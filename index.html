@@ -366,7 +366,7 @@ const getPlayerEventScores = (playerId, clan, eventId) => {
   const entries = storage.getScores()[`${clan}_${eventId}`] || [];
   return entries
     .filter(e => e.scores && e.scores[playerId])
-    .map(e => ({ date: e.date.slice(0, 10), values: e.scores[playerId] }));
+    .map(e => ({ date: e.date, displayDate: e.date.slice(0, 10), values: e.scores[playerId] }));
 };
 
 const getTrend = (scores, fieldKey) => {
@@ -1042,7 +1042,7 @@ const PlayerDetail = ({ player, onBack }) => {
                   {shown.map((s, i) => (
                     <div key={i} style={{ textAlign:"center" }}>
                       <div style={{ fontSize:9, color:"#94a3b8", fontWeight:600, fontFamily:"'DM Mono',monospace", marginBottom: canEdit ? 2 : 0 }}>
-                        {i===0 ? "Latest" : s.date}
+                        {i===0 ? "Latest" : s.displayDate}
                       </div>
                       {canEdit && (
                         <div style={{ display:"flex", justifyContent:"center", gap:4 }}>
