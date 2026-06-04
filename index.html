@@ -711,14 +711,15 @@ const calcOlympusFrags = (scoreEntry, allPlayers, clan, totalFrags) => {
 };
 
 const exportFragsCSV = (dist) => {
+  const q = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const isOmens = dist.eventId === "omens";
   const hdrs = isOmens
-    ? ["Player","Essence","Chest Score","Damage Score","Winner Frags","Chest Frags","Damage Frags","Calculated","Final"]
-    : ["Player","Score","Calculated","Final"];
+    ? ["Player","Essence","Chest Score","Damage Score","Winner Frags","Chest Frags","Damage Frags","Calculated Frags","Final Frags"]
+    : ["Player","Score","Calculated Frags","Final Frags"];
   const rows = dist.allocations.map(a => isOmens
     ? [a.playerName, a.essence, a.chestScore, a.damageScore, a.winnerFrags, a.chestFrags, a.damageFrags, a.calculatedFrags, a.finalFrags]
     : [a.playerName, a.score, a.calculatedFrags, a.finalFrags]);
-  const csv  = [hdrs, ...rows].map(r => r.join(",")).join("\n");
+  const csv  = [hdrs, ...rows].map(r => r.map(q).join(",")).join("\n");
   const blob = new Blob([csv], { type:"text/csv" });
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement("a");
@@ -728,6 +729,22 @@ const exportFragsCSV = (dist) => {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+};
+
+const emailFragDist = (clan, eventId, allocations) => {
+  const scored = allocations.filter(a => a.scored).sort((a,b) => b.finalFrags - a.finalFrags);
+  const event  = eventId === "omens" ? "Omens" : "Olympus";
+  const lines  = [
+    `Fragment Distribution — ${clan} ${event}`,
+    `Date: ${new Date().toLocaleDateString()}`,
+    "",
+    ...scored.map(a => `${a.playerName}: ${a.finalFrags} frags`),
+    "",
+    `Total distributed: ${scored.reduce((s,a) => s + (a.finalFrags||0), 0)}`,
+  ];
+  const subject = encodeURIComponent(`${clan} ${event} Fragment Distribution — ${new Date().toLocaleDateString()}`);
+  const body    = encodeURIComponent(lines.join("\n"));
+  window.location.href = `mailto:?subject=${subject}&body=${body}`;
 };
 
 // ─── ICONS ────────────────────────────────────────────────────────────────────
@@ -3124,6 +3141,7 @@ const FragmentDistributionView = ({ onBack }) => {
             : <span style={{ fontSize:12, color:"#16a34a", fontWeight:700, alignSelf:"center" }}>Saved ✓</span>
           }
           <Btn onClick={()=>exportFragsCSV({ clan, eventId, date:today(), allocations })} variant="ghost" size="sm">CSV</Btn>
+          <Btn onClick={()=>emailFragDist(clan, eventId, allocations)} variant="ghost" size="sm">Email</Btn>
         </div>
       </div>
 
@@ -3176,6 +3194,7 @@ const FragmentDistributionView = ({ onBack }) => {
       {saved && (
         <div style={{ marginTop:16, display:"flex", gap:10 }}>
           <Btn onClick={()=>exportFragsCSV({ clan, eventId, date:today(), allocations })} variant="ghost" size="lg" fullWidth>Export CSV</Btn>
+          <Btn onClick={()=>emailFragDist(clan, eventId, allocations)} variant="ghost" size="lg" fullWidth>Email</Btn>
           <Btn onClick={onBack} variant="primary" size="lg" fullWidth>Done</Btn>
         </div>
       )}
