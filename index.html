@@ -2347,16 +2347,26 @@ const LevelRequestsView = ({ onBack }) => {
 
 // ─── ROTATION VIEW ────────────────────────────────────────────────────────────
 const RotationView = ({ onBack, onLog }) => {
-  const [playerId,setPlayerId] = useState("");
-  const [toClan,  setToClan]   = useState("");
-  const [confirm, setConfirm]  = useState(false);
+  const { role, clan: sessionClan } = useSession();
+  const [filterClan, setFilterClan] = useState(role === "clan" ? sessionClan : "");
+  const [search,     setSearch]     = useState("");
+  const [playerId,   setPlayerId]   = useState("");
+  const [toClan,     setToClan]     = useState("");
+  const [confirm,    setConfirm]    = useState(false);
   const forceUpdate = useForceUpdate();
+
   const all    = storage.getPlayers();
-  const player = all.find(p=>p.id===playerId);
-  const avail  = CLANS.filter(c=>c!==player?.clan);
+  const player = all.find(p => p.id === playerId);
+  const avail  = CLANS.filter(c => c !== player?.clan);
+
+  const filteredPlayers = all
+    .filter(p => p.active)
+    .filter(p => !filterClan || p.clan === filterClan)
+    .filter(p => !search || p.name.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => a.name.localeCompare(b.name));
 
   const rotate = () => {
-    storage.savePlayers(all.map(p=>p.id===playerId?{...p,clan:toClan}:p));
+    storage.savePlayers(all.map(p => p.id === playerId ? { ...p, clan: toClan } : p));
     storage.saveRotationLog([{ id:uid(), playerId, playerName:player.name, fromClan:player.clan, toClan, date:today() }, ...storage.getRotationLog()]);
     setConfirm(false); setPlayerId(""); setToClan(""); forceUpdate();
   };
@@ -2368,21 +2378,50 @@ const RotationView = ({ onBack, onLog }) => {
         <h2 style={{ fontSize:20, fontWeight:800, color:"#1e293b", margin:0 }}>Player Rotation</h2>
         <Btn onClick={onLog} variant="ghost" size="sm"><Icon name="history" size={14} color="#475569"/> Log</Btn>
       </div>
-      <p style={{ fontSize:13, color:"#64748b", margin:"0 0 20px", lineHeight:1.5 }}>Move a player to a different clan. Score history moves with them and the rotation is logged.</p>
-      <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-        <div><Label>Player</Label><SelField value={playerId} onChange={v=>{ setPlayerId(v); setToClan(""); }} options={all.filter(p=>p.active).map(p=>({value:p.id,label:`${p.name} (${p.clan})`}))} placeholder="Select player…"/></div>
-        {player && (
-          <>
-            <div style={{ backgroundColor:"#f8fafc", borderRadius:10, padding:"10px 14px", display:"flex", alignItems:"center", gap:8 }}>
-              <span style={{ fontSize:13, color:"#64748b" }}>Currently in:</span><ClanBadge clan={player.clan}/>
-            </div>
-            <div><Label>Move To</Label><SelField value={toClan} onChange={setToClan} options={avail.map(c=>({value:c,label:c}))} placeholder="Select destination clan…"/></div>
-          </>
-        )}
-        <Btn onClick={()=>setConfirm(true)} variant="primary" size="lg" fullWidth disabled={!playerId||!toClan}>
-          <Icon name="rotate" size={17} color="#fff"/> Rotate Player
-        </Btn>
+      <p style={{ fontSize:13, color:"#64748b", margin:"0 0 16px", lineHeight:1.5 }}>Move a player to a different clan. Score history moves with them and the rotation is logged.</p>
+
+      <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:12 }}>
+        <SelField value={filterClan} onChange={v => { setFilterClan(v); setPlayerId(""); setToClan(""); setSearch(""); forceUpdate(); }}
+          options={CLANS.map(c => ({ value:c, label:c }))} placeholder="All clans…"/>
+        <input value={search} onChange={e => { setSearch(e.target.value); setPlayerId(""); setToClan(""); forceUpdate(); }}
+          placeholder="Search player…" style={{ ...inputStyle }}/>
       </div>
+
+      <div style={{ maxHeight:220, overflowY:"auto", display:"flex", flexDirection:"column", gap:4, marginBottom:16 }}>
+        {filteredPlayers.length === 0
+          ? <div style={{ fontSize:13, color:"#94a3b8", padding:"8px 0" }}>
+              {all.filter(p => p.active).length === 0 ? "No active players found." : "No players match this filter."}
+            </div>
+          : filteredPlayers.map(p => (
+            <div key={p.id} onClick={() => { setPlayerId(p.id); setToClan(""); }} style={{
+              padding:"10px 14px", borderRadius:10, cursor:"pointer", fontSize:14,
+              fontWeight: playerId === p.id ? 700 : 500,
+              backgroundColor: playerId === p.id ? "#1e293b" : "#f8fafc",
+              color: playerId === p.id ? "#fff" : "#1e293b",
+              border: playerId === p.id ? "none" : "1.5px solid #e2e8f0",
+              display:"flex", alignItems:"center", gap:8,
+            }}>
+              <span style={{ flex:1 }}>{p.name}</span>
+              <ClanBadge clan={p.clan}/>
+            </div>
+          ))
+        }
+      </div>
+
+      {player && (
+        <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
+          <div style={{ backgroundColor:"#f8fafc", borderRadius:10, padding:"10px 14px", display:"flex", alignItems:"center", gap:8 }}>
+            <span style={{ fontSize:13, color:"#64748b" }}>Currently in:</span><ClanBadge clan={player.clan}/>
+          </div>
+          <div><Label>Move To</Label>
+            <SelField value={toClan} onChange={setToClan} options={avail.map(c=>({value:c,label:c}))} placeholder="Select destination clan…"/>
+          </div>
+          <Btn onClick={()=>setConfirm(true)} variant="primary" size="lg" fullWidth disabled={!toClan}>
+            <Icon name="rotate" size={17} color="#fff"/> Rotate Player
+          </Btn>
+        </div>
+      )}
+
       {confirm && <Modal title={`Move ${player?.name} to ${toClan}?`} message={`${player?.name} will be moved from ${player?.clan} to ${toClan}. Score history transfers. This rotation will be logged.`} confirmLabel="Confirm Rotation" confirmVariant="primary" onConfirm={rotate} onCancel={()=>setConfirm(false)}/>}
     </div>
   );
@@ -2764,98 +2803,219 @@ const BulkPlayerUpdate = ({ onBack }) => {
 
 // ─── MERGE PLAYERS VIEW ───────────────────────────────────────────────────────
 const MergePlayersView = ({ onBack }) => {
-  const [primaryId, setPrimaryId] = useState("");
-  const [sourceId,  setSourceId]  = useState("");
-  const [confirm,   setConfirm]   = useState(false);
+  const { role, clan: sessionClan } = useSession();
+  const forceUpdate = useForceUpdate();
+  const def = role === "clan" ? sessionClan : "";
 
-  const allPlayers = storage.getPlayers();
-  const primary = allPlayers.find(p => p.id === primaryId);
-  const source  = allPlayers.find(p => p.id === sourceId);
+  const [pClan,      setPClan]      = useState(def);
+  const [pSearch,    setPSearch]    = useState("");
+  const [primaryIdx, setPrimaryIdx] = useState(-1);   // index into all[]
+
+  const [sClan,     setSClan]     = useState(def);
+  const [sSearch,   setSSearch]   = useState("");
+  const [sourceIdx, setSourceIdx] = useState(-1);     // index into all[]
+
+  const [confirm, setConfirm] = useState(false);
+
+  const all = storage.getPlayers();
+
+  // Resolved player objects (null if not yet selected)
+  const primary = primaryIdx >= 0 ? (all[primaryIdx] || null) : null;
+  const source  = sourceIdx  >= 0 ? (all[sourceIdx]  || null) : null;
+  // Same entry selected in both pickers
+  const sameP   = primaryIdx >= 0 && sourceIdx >= 0 && primaryIdx === sourceIdx;
+
+  // Each entry carries its original index so two identically-named/id'd players
+  // are always distinguishable even when IDs collide.
+  const allIndexed = all.map((p, i) => Object.assign({}, p, { _idx: i }));
+
+  // Primary list — exclude the source entry by index (not by id)
+  let pList = allIndexed.slice();
+  if (sourceIdx >= 0)  pList = pList.filter(p => p._idx !== sourceIdx);
+  if (pClan !== "")    pList = pList.filter(p => p.clan === pClan);
+  if (pSearch !== "")  pList = pList.filter(p => p.name && p.name.toLowerCase().indexOf(pSearch.toLowerCase()) !== -1);
+  pList.sort((a, b) => (a.name||"").localeCompare(b.name||""));
+
+  // Secondary list — exclude the primary entry by index
+  let sList = allIndexed.slice();
+  if (primaryIdx >= 0) sList = sList.filter(p => p._idx !== primaryIdx);
+  if (sClan !== "")    sList = sList.filter(p => p.clan === sClan);
+  if (sSearch !== "")  sList = sList.filter(p => p.name && p.name.toLowerCase().indexOf(sSearch.toLowerCase()) !== -1);
+  sList.sort((a, b) => (a.name||"").localeCompare(b.name||""));
+
+  const scoreCount = (pid) => {
+    if (!pid) return 0;
+    let n = 0;
+    Object.values(storage.getScores()).forEach(entries =>
+      entries.forEach(e => { if (e.scores && e.scores[pid]) n++; })
+    );
+    return n;
+  };
 
   const doMerge = () => {
     _ensure();
-    // Merge scores: for each event entry transfer source's score to primary, keeping higher
-    const allScores = storage.getScores();
-    const newScores = {};
-    Object.keys(allScores).forEach(key => {
-      newScores[key] = allScores[key].map(entry => {
-        if (!entry.scores?.[sourceId]) return entry;
-        const s = { ...entry.scores };
-        const eventId = key.split("_").slice(1).join("_");
-        const ev = EVENT_TYPES.find(e => e.id === eventId);
-        const fk = ev?.fields[0]?.key || "points";
-        if (s[primaryId]) {
-          if (Number(s[sourceId][fk] || 0) > Number(s[primaryId][fk] || 0)) s[primaryId] = s[sourceId];
-        } else {
-          s[primaryId] = s[sourceId];
-        }
-        delete s[sourceId];
-        return { ...entry, scores: s };
+    const prim = all[primaryIdx];
+    const src  = all[sourceIdx];
+    // Only merge scores when IDs differ; if IDs are the same the score key is shared
+    if (prim.id !== src.id) {
+      const allScores = storage.getScores();
+      const newScores = {};
+      Object.keys(allScores).forEach(key => {
+        newScores[key] = allScores[key].map(entry => {
+          if (!entry.scores || !entry.scores[src.id]) return entry;
+          const s = Object.assign({}, entry.scores);
+          const eventId = key.split("_").slice(1).join("_");
+          const ev = EVENT_TYPES.find(e => e.id === eventId);
+          const fk = ev && ev.fields[0] ? ev.fields[0].key : "points";
+          if (s[prim.id]) {
+            if (Number(s[src.id][fk] || 0) > Number(s[prim.id][fk] || 0)) s[prim.id] = s[src.id];
+          } else {
+            s[prim.id] = s[src.id];
+          }
+          delete s[src.id];
+          return Object.assign({}, entry, { scores: s });
+        });
       });
-    });
-    window._appData.players = storage.getPlayers().filter(p => p.id !== sourceId);
-    window._appData.scores  = newScores;
+      window._appData.scores = newScores;
+    }
+    // Delete the source record by its original index, not by id
+    window._appData.players = all.filter((p, i) => i !== sourceIdx);
     saveToSheets(window._appData);
     onBack();
   };
 
-  const Preview = ({ player, label }) => (
-    <div style={{ flex:1, backgroundColor:"#f8fafc", borderRadius:10, padding:"12px 14px" }}>
-      <div style={{ fontSize:10, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:6 }}>{label}</div>
-      <div style={{ fontSize:14, fontWeight:700, color:"#1e293b", marginBottom:6 }}>{player.name}</div>
-      <div style={{ display:"flex", gap:5, flexWrap:"wrap" }}>
-        <ClanBadge clan={player.clan}/>
-        {Object.keys(LEVEL_TYPES).map(t => player.levels?.[t] ? <LevelBadge key={t} type={t} value={player.levels[t]}/> : null)}
-      </div>
-      {(player.hero != null || player.might != null) && (
-        <div style={{ fontSize:11, color:"#64748b", marginTop:6 }}>
-          {player.hero  != null && <span>Hero {player.hero} </span>}
-          {player.might != null && <span>· {formatScore(player.might)} Might</span>}
-        </div>
-      )}
-    </div>
-  );
+  const clanBtnStyle = (active) => ({
+    padding:"8px 0", borderRadius:8, fontSize:13, fontWeight:700, border:"none",
+    cursor:"pointer", flex:1,
+    backgroundColor: active ? "#1e293b" : "#f1f5f9",
+    color: active ? "#fff" : "#64748b",
+  });
+
+  const rowStyle = (selected) => ({
+    padding:"10px 14px", borderRadius:10, cursor:"pointer", fontSize:14,
+    fontWeight: selected ? 700 : 500,
+    backgroundColor: selected ? "#1e293b" : "#f8fafc",
+    color: selected ? "#fff" : "#1e293b",
+    border: selected ? "2px solid #1e293b" : "1.5px solid #e2e8f0",
+    display:"flex", alignItems:"center", gap:8,
+  });
 
   return (
     <div style={{ padding:"0 16px 16px" }}>
       <BackBtn onBack={onBack}/>
       <h2 style={{ fontSize:20, fontWeight:800, color:"#1e293b", margin:"0 0 6px" }}>Merge Players</h2>
-      <p style={{ fontSize:13, color:"#64748b", margin:"0 0 20px", lineHeight:1.5 }}>
-        Combine two records into one. Score history is merged — higher score wins when both have the same event entry. The secondary player is permanently deleted.
+      <p style={{ fontSize:13, color:"#64748b", margin:"0 0 16px", lineHeight:1.5 }}>
+        Pick a primary (keep) and secondary (delete). Score history is merged — higher score wins.
       </p>
-      <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
-        <div>
-          <Label>Primary <span style={{ textTransform:"none", fontWeight:400, color:"#94a3b8", fontSize:11 }}>(keep this record)</span></Label>
-          <SelField value={primaryId} onChange={v=>{ setPrimaryId(v); if(v===sourceId) setSourceId(""); }}
-            options={allPlayers.map(p=>({value:p.id,label:`${p.name} (${p.clan})`}))} placeholder="Select primary player…"/>
+
+      {/* ── Primary picker ── */}
+      <div style={{ marginBottom:20 }}>
+        <Label>Primary <span style={{ textTransform:"none", fontWeight:400, color:"#94a3b8", fontSize:11 }}>(keep this record)</span></Label>
+        <div style={{ display:"flex", gap:6, marginBottom:8 }}>
+          {["", ...CLANS].map(c => (
+            <button key={c||"all"} type="button"
+              onClick={() => { setPClan(c); setPrimaryIdx(-1); setPSearch(""); forceUpdate(); }}
+              style={clanBtnStyle(pClan === c)}>
+              {c || "All"}
+            </button>
+          ))}
         </div>
-        <div>
-          <Label>Secondary <span style={{ textTransform:"none", fontWeight:400, color:"#94a3b8", fontSize:11 }}>(will be deleted)</span></Label>
-          <SelField value={sourceId} onChange={setSourceId}
-            options={allPlayers.filter(p=>p.id!==primaryId).map(p=>({value:p.id,label:`${p.name} (${p.clan})`}))} placeholder="Select secondary player…"/>
+        <input
+          placeholder="Search player…"
+          onInput={e => { setPSearch(e.target.value); forceUpdate(); }}
+          onChange={e => { setPSearch(e.target.value); forceUpdate(); }}
+          style={{ width:"100%", padding:"11px 14px", borderRadius:10, border:"1.5px solid #e2e8f0", fontSize:14, color:"#1e293b", outline:"none", backgroundColor:"#fff", fontFamily:"'Outfit',system-ui,sans-serif", boxSizing:"border-box", marginBottom:4 }}/>
+        <div style={{ fontSize:11, color:"#94a3b8", marginBottom:6 }}>
+          {pList.length} player{pList.length !== 1 ? "s" : ""}{pClan ? " in " + pClan : " (all clans)"}{pSearch ? ' matching "' + pSearch + '"' : ""}
         </div>
-        {primary && source && (
-          <>
-            <div style={{ display:"flex", gap:8, alignItems:"stretch" }}>
-              <Preview player={primary} label="Keep"/>
-              <div style={{ display:"flex", alignItems:"center", color:"#94a3b8", fontSize:18, fontWeight:700, paddingBottom:8 }}>←</div>
-              <Preview player={source}  label="Delete"/>
-            </div>
-            <div style={{ backgroundColor:"#fef3c7", borderRadius:10, padding:"10px 14px", fontSize:13, color:"#92400e", lineHeight:1.5 }}>
-              ⚠️ <strong>{source.name}</strong>'s scores merge into <strong>{primary.name}</strong> (higher wins). <strong>{source.name}</strong> is permanently deleted.
-            </div>
-            <Btn onClick={()=>setConfirm(true)} variant="danger" size="lg" fullWidth>Merge Players</Btn>
-          </>
-        )}
+        <div key={"p|" + pClan + "|" + pSearch + "|" + sourceIdx} style={{ maxHeight:200, overflowY:"auto", display:"flex", flexDirection:"column", gap:4 }}>
+          {pList.length === 0
+            ? <div style={{ fontSize:13, color:"#94a3b8" }}>No players found.</div>
+            : pList.map(p => (
+              <div key={p._idx} onClick={() => { setPrimaryIdx(p._idx); forceUpdate(); }} style={rowStyle(primaryIdx === p._idx)}>
+                <span style={{ flex:1 }}>{p.name}</span>
+                <ClanBadge clan={p.clan}/>
+                {!p.active && <span style={{ fontSize:11, backgroundColor:"#e2e8f0", color:"#64748b", borderRadius:4, padding:"1px 6px" }}>Inactive</span>}
+              </div>
+            ))
+          }
+        </div>
       </div>
+
+      {/* ── Secondary picker ── */}
+      <div style={{ marginBottom:20 }}>
+        <Label>Secondary <span style={{ textTransform:"none", fontWeight:400, color:"#94a3b8", fontSize:11 }}>(will be deleted)</span></Label>
+        <div style={{ display:"flex", gap:6, marginBottom:8 }}>
+          {["", ...CLANS].map(c => (
+            <button key={c||"all"} type="button"
+              onClick={() => { setSClan(c); setSourceIdx(-1); setSSearch(""); forceUpdate(); }}
+              style={clanBtnStyle(sClan === c)}>
+              {c || "All"}
+            </button>
+          ))}
+        </div>
+        <input
+          placeholder="Search player…"
+          onInput={e => { setSSearch(e.target.value); forceUpdate(); }}
+          onChange={e => { setSSearch(e.target.value); forceUpdate(); }}
+          style={{ width:"100%", padding:"11px 14px", borderRadius:10, border:"1.5px solid #e2e8f0", fontSize:14, color:"#1e293b", outline:"none", backgroundColor:"#fff", fontFamily:"'Outfit',system-ui,sans-serif", boxSizing:"border-box", marginBottom:4 }}/>
+        <div style={{ fontSize:11, color:"#94a3b8", marginBottom:6 }}>
+          {sList.length} player{sList.length !== 1 ? "s" : ""}{sClan ? " in " + sClan : " (all clans)"}{sSearch ? ' matching "' + sSearch + '"' : ""}
+        </div>
+        <div key={"s|" + sClan + "|" + sSearch + "|" + primaryIdx} style={{ maxHeight:200, overflowY:"auto", display:"flex", flexDirection:"column", gap:4 }}>
+          {sList.length === 0
+            ? <div style={{ fontSize:13, color:"#94a3b8" }}>No players found.</div>
+            : sList.map(p => (
+              <div key={p._idx} onClick={() => { setSourceIdx(p._idx); forceUpdate(); }} style={rowStyle(sourceIdx === p._idx)}>
+                <span style={{ flex:1 }}>{p.name}</span>
+                <ClanBadge clan={p.clan}/>
+                {!p.active && <span style={{ fontSize:11, backgroundColor:"#e2e8f0", color:"#64748b", borderRadius:4, padding:"1px 6px" }}>Inactive</span>}
+              </div>
+            ))
+          }
+        </div>
+      </div>
+
+      {/* ── Validation / preview / action ── */}
+      {sameP && (
+        <div style={{ backgroundColor:"#fee2e2", borderRadius:10, padding:"10px 14px", fontSize:13, color:"#991b1b", marginBottom:12 }}>
+          ⚠️ Same record selected in both. Pick a different entry for Secondary.
+        </div>
+      )}
+      {primary && source && !sameP && (
+        <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+          <div style={{ display:"flex", gap:8 }}>
+            {[{p:primary, label:"✓ Keep", accent:"#16a34a", idx:primaryIdx}, {p:source, label:"✗ Delete", accent:"#dc2626", idx:sourceIdx}].map(({p, label, accent, idx}) => (
+              <div key={idx} style={{ flex:1, backgroundColor:"#f8fafc", borderRadius:12, padding:"12px", border:`2px solid ${accent}` }}>
+                <div style={{ fontSize:10, fontWeight:700, color:accent, textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:6 }}>{label}</div>
+                <div style={{ fontSize:14, fontWeight:800, color:"#1e293b", marginBottom:4 }}>{p.name}</div>
+                <ClanBadge clan={p.clan}/>
+                <div style={{ fontSize:11, color:"#64748b", marginTop:6, display:"flex", flexDirection:"column", gap:1 }}>
+                  {p.hero  != null && <span>Hero {p.hero}</span>}
+                  {p.level != null && <span>Level {p.level}</span>}
+                  {p.might != null && <span>{Number(p.might).toLocaleString()} Might</span>}
+                  {p.levels && p.levels.G && <span>Guard {p.levels.G}</span>}
+                  <span>{scoreCount(p.id)} score entries</span>
+                  {!p.active && <span style={{ color:"#94a3b8" }}>Inactive</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ backgroundColor:"#fef3c7", borderRadius:10, padding:"10px 14px", fontSize:13, color:"#92400e", lineHeight:1.5 }}>
+            ⚠️ <strong>{source.name}</strong>'s scores merge into <strong>{primary.name}</strong>. <strong>{source.name}</strong> is permanently deleted.
+          </div>
+          <Btn onClick={() => setConfirm(true)} variant="danger" size="lg" fullWidth>Merge Players</Btn>
+        </div>
+      )}
+
       {confirm && (
         <Modal
-          title={`Merge ${source?.name} into ${primary?.name}?`}
-          message={`${source?.name} will be permanently deleted and their scores merged into ${primary?.name}. This cannot be undone.`}
+          title={`Merge ${source ? source.name : ""} into ${primary ? primary.name : ""}?`}
+          message={`${source ? source.name : ""} will be permanently deleted and their scores merged into ${primary ? primary.name : ""}. This cannot be undone.`}
           confirmLabel="Yes, Merge"
           confirmVariant="danger"
           onConfirm={doMerge}
-          onCancel={()=>setConfirm(false)}
+          onCancel={() => setConfirm(false)}
         />
       )}
     </div>
@@ -2864,12 +3024,19 @@ const MergePlayersView = ({ onBack }) => {
 
 // ─── DELETE PLAYER VIEW ───────────────────────────────────────────────────────
 const DeletePlayerView = ({ onBack }) => {
+  const { role, clan: sessionClan } = useSession();
+  const [clan,     setClan]    = useState(role === "clan" ? sessionClan : "");
+  const [search,   setSearch]  = useState("");
   const [deleting, setDeleting] = useState(null);
   const forceUpdate = useForceUpdate();
 
+  // Read from global each render — forceUpdate() ensures React re-runs this
   const allPlayers = storage.getPlayers();
-  const inactive   = [...allPlayers].filter(p => !p.active).sort((a,b)=>a.name.localeCompare(b.name));
-  const active     = [...allPlayers].filter(p =>  p.active).sort((a,b)=>a.name.localeCompare(b.name));
+  const filtered   = allPlayers
+    .filter(p => clan   === "" || p.clan === clan)
+    .filter(p => search === "" || p.name.toLowerCase().includes(search.toLowerCase()));
+  const inactive = [...filtered].filter(p => !p.active).sort((a,b) => a.name.localeCompare(b.name));
+  const active   = [...filtered].filter(p =>  p.active).sort((a,b) => a.name.localeCompare(b.name));
 
   const doDelete = () => {
     if (!deleting) return;
@@ -2912,7 +3079,13 @@ const DeletePlayerView = ({ onBack }) => {
       <p style={{ fontSize:13, color:"#64748b", margin:"0 0 16px", lineHeight:1.5 }}>
         Permanently removes a player and all their score history. Inactive players are listed first.
       </p>
-      {allPlayers.length === 0 && <EmptyState icon="players" message="No players found"/>}
+      <div style={{ display:"flex", flexDirection:"column", gap:10, marginBottom:16 }}>
+        <SelField value={clan} onChange={v => { setClan(v); setSearch(""); forceUpdate(); }}
+          options={CLANS.map(c => ({ value:c, label:c }))} placeholder="All clans…"/>
+        <input value={search} onChange={e => { setSearch(e.target.value); forceUpdate(); }}
+          placeholder="Search player…" style={{ ...inputStyle }}/>
+      </div>
+      {filtered.length === 0 && <EmptyState icon="players" message="No players found"/>}
       <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
         {inactive.length > 0 && <>
           <div style={{ fontSize:11, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:"0.08em", marginTop:4 }}>Inactive ({inactive.length})</div>
