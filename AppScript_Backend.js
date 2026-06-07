@@ -26,11 +26,22 @@
 //   A21 → { pins: { super, 69R, 69S, 69D, user } }
 //
 // Each cell stays well under Google's 50,000 char limit.
-// Old entries are automatically pruned — MAX_HISTORY_ENTRIES kept per event.
+// Entries are pruned per-event — limits are set below based on 130-player clan sizes.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SHEET_NAME       = "AppData";
-const MAX_HISTORY_ENTRIES = 20; // How many date entries to keep per event
+const SHEET_NAME = "AppData";
+
+// Per-event history limits — derived from cell-size analysis at 130 players per clan.
+// single-field events: 12 entries ≈ 44K chars (safe)
+// two/three-field events: 5 entries ≈ 37K chars (safe)
+// Raising these above these values risks silently exceeding the 50K cell limit.
+const MAX_HISTORY_BY_EVENT = {
+  "weekly_chests": 12,
+  "tin_man":       12,
+  "ragnarok":      12,
+  "omens":          5,
+  "olympus":        5,
+};
 
 // Fixed mapping: score key → row number in column A
 const SCORE_ROW_MAP = {
@@ -60,13 +71,27 @@ const EMPTY_DATA = {
   fragmentDistributions: [], lastBackup: null, pins: null,
 };
 
-// ── Prune a single event's date entries to MAX_HISTORY_ENTRIES ─────────────────
-function pruneEventDates(eventData) {
+// ── Prune a single event's entries to the per-event limit ────────────────────
+// eventId: e.g. "omens", "weekly_chests" — used to look up the right limit.
+// Handles both the current ARRAY format and the legacy date-keyed OBJECT format.
+function pruneEventDates(eventData, eventId) {
+  var limit = MAX_HISTORY_BY_EVENT[eventId] || 12;
+
+  if (Array.isArray(eventData)) {
+    // Current format: array of { date, scores } objects
+    if (eventData.length <= limit) return eventData;
+    // Sort newest first (ISO date strings sort correctly as strings), keep most recent
+    return eventData.slice().sort(function(a, b) {
+      return a.date < b.date ? 1 : a.date > b.date ? -1 : 0;
+    }).slice(0, limit);
+  }
+
+  // Legacy format: date-keyed object { "2026-01-01": { pid: { points: ... } }, ... }
   if (!eventData || typeof eventData !== "object") return eventData;
   var dates = Object.keys(eventData).sort(); // ascending — oldest first
-  if (dates.length <= MAX_HISTORY_ENTRIES) return eventData;
+  if (dates.length <= limit) return eventData;
   var pruned = {};
-  dates.slice(dates.length - MAX_HISTORY_ENTRIES).forEach(function(d) {
+  dates.slice(dates.length - limit).forEach(function(d) {
     pruned[d] = eventData[d];
   });
   return pruned;
@@ -199,8 +224,9 @@ function writeData(data) {
 
   // Write each score key to its own cell, pruning old entries
   SCORE_KEYS.forEach(function(key) {
-    var row       = SCORE_ROW_MAP[key];
-    var eventData = pruneEventDates(scores[key] || {});
+    var row     = SCORE_ROW_MAP[key];
+    var eventId = key.split("_").slice(1).join("_"); // "69R_weekly_chests" → "weekly_chests"
+    var eventData = pruneEventDates(scores[key] || [], eventId);
     sheet.getRange("A" + row).setValue(JSON.stringify({ scores: { [key]: eventData } }));
   });
 }
@@ -234,8 +260,9 @@ function migrateLegacy(sheet) {
     fragmentDistributions: rawC1.fragmentDistributions || [],
   }));
   SCORE_KEYS.forEach(function(key) {
-    var row       = SCORE_ROW_MAP[key];
-    var eventData = pruneEventDates(scores[key] || {});
+    var row     = SCORE_ROW_MAP[key];
+    var eventId = key.split("_").slice(1).join("_");
+    var eventData = pruneEventDates(scores[key] || [], eventId);
     sheet.getRange("A" + row).setValue(JSON.stringify({ scores: { [key]: eventData } }));
   });
 
