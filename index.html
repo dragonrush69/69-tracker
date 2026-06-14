@@ -324,6 +324,7 @@ const storage = {
 const uid   = () => Math.random().toString(36).slice(2, 9);
 const today = () => new Date().toISOString().slice(0, 10);
 const useForceUpdate = () => { const [,setN] = useState(0); return () => setN(n=>n+1); };
+const scrollToTop = () => { try { window.scrollTo({ top:0, left:0, behavior:"instant" }); } catch(_) { window.scrollTo(0,0); } };
 
 // ─── FUZZY MATCH ──────────────────────────────────────────────────────────────
 const normalise = s => s.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -697,16 +698,24 @@ const calcOmensFrags = (scoreEntry, allPlayers, clan, totalFrags, winnerPct, che
   });
 };
 
-const calcOlympusFrags = (scoreEntry, allPlayers, clan, totalFrags) => {
-  const players    = allPlayers.filter(p => p.clan === clan && p.active);
-  const scores     = scoreEntry?.scores || {};
-  const totalScore = players.filter(p => scores[p.id]).reduce((s, p) => s + Number(scores[p.id]?.score || 0), 0);
+const calcOlympusFrags = (scoreEntry, allPlayers, clan, totalFrags, scorePct=50, chestPct=50) => {
+  const players     = allPlayers.filter(p => p.clan === clan && p.active);
+  const scores      = scoreEntry?.scores || {};
+  const scoredPlayers = players.filter(p => scores[p.id]);
+  const totalScore  = scoredPlayers.reduce((s, p) => s + Number(scores[p.id]?.score  || 0), 0);
+  const totalChests = scoredPlayers.reduce((s, p) => s + Number(scores[p.id]?.chests || 0), 0);
+  const scorePool   = Math.round(totalFrags * scorePct / 100);
+  const chestPool   = totalFrags - scorePool;
+
   return players.map(p => {
     const s = scores[p.id];
-    if (!s) return { playerId:p.id, playerName:p.name, scored:false, score:0, calculatedFrags:0, finalFrags:0 };
-    const score = Number(s.score || 0);
-    const calculatedFrags = totalScore > 0 ? Math.floor(score / totalScore * totalFrags) : 0;
-    return { playerId:p.id, playerName:p.name, scored:true, score, calculatedFrags, finalFrags:calculatedFrags };
+    if (!s) return { playerId:p.id, playerName:p.name, scored:false, score:0, chestScore:0, scoreFrags:0, chestFrags:0, calculatedFrags:0, finalFrags:0 };
+    const score      = Number(s.score  || 0);
+    const chestScore = Number(s.chests || 0);
+    const scoreFrags = totalScore  > 0 ? Math.floor(score      / totalScore  * scorePool) : 0;
+    const chestFrags = totalChests > 0 ? Math.floor(chestScore / totalChests * chestPool) : 0;
+    const calculatedFrags = scoreFrags + chestFrags;
+    return { playerId:p.id, playerName:p.name, scored:true, score, chestScore, scoreFrags, chestFrags, calculatedFrags, finalFrags:calculatedFrags };
   });
 };
 
@@ -715,10 +724,10 @@ const exportFragsCSV = (dist) => {
   const isOmens = dist.eventId === "omens";
   const hdrs = isOmens
     ? ["Player","Essence","Chest Score","Damage Score","Winner Frags","Chest Frags","Damage Frags","Calculated Frags","Final Frags"]
-    : ["Player","Score","Calculated Frags","Final Frags"];
+    : ["Player","Score","Chest Score","Score Frags","Chest Frags","Calculated Frags","Final Frags"];
   const rows = dist.allocations.map(a => isOmens
     ? [a.playerName, a.essence, a.chestScore, a.damageScore, a.winnerFrags, a.chestFrags, a.damageFrags, a.calculatedFrags, a.finalFrags]
-    : [a.playerName, a.score, a.calculatedFrags, a.finalFrags]);
+    : [a.playerName, a.score, a.chestScore, a.scoreFrags, a.chestFrags, a.calculatedFrags, a.finalFrags]);
   const csv  = [hdrs, ...rows].map(r => r.map(q).join(",")).join("\n");
   const blob = new Blob([csv], { type:"text/csv" });
   const url  = URL.createObjectURL(blob);
@@ -836,7 +845,7 @@ const EmptyState = ({ icon, message }) => (
 );
 
 const BackBtn = ({ onBack }) => (
-  <button onClick={onBack} style={{ background:"none", border:"none", color:"#3b82f6", fontSize:14, fontWeight:600, cursor:"pointer", padding:"0 0 16px", display:"flex", alignItems:"center", gap:4 }}>
+  <button onClick={()=>{ onBack(); scrollToTop(); }} style={{ background:"none", border:"none", color:"#3b82f6", fontSize:14, fontWeight:600, cursor:"pointer", padding:"0 0 16px", display:"flex", alignItems:"center", gap:4 }}>
     <Icon name="back" size={16} color="#3b82f6"/> Back
   </button>
 );
@@ -1623,7 +1632,8 @@ const ScoreForm = ({ clan, event, onBack }) => {
     if (all[key].length > 3) all[key] = all[key].slice(0, 3);
     storage.saveScores(all);
     setSaved(true);
-    setTimeout(() => { setSaved(false); onBack(); }, 1200);
+    scrollToTop();
+    setTimeout(() => { setSaved(false); onBack(); scrollToTop(); }, 1200);
   };
 
   const fieldBorder = (pid, key) => errors[pid]?.[key] ? "#dc2626" : "#e2e8f0";
@@ -3023,6 +3033,21 @@ const MergePlayersView = ({ onBack }) => {
 };
 
 // ─── DELETE PLAYER VIEW ───────────────────────────────────────────────────────
+// Defined at module level so it isn't re-created on every parent render
+const DeletePlayerRow = ({ p, onDelete }) => (
+  <Card style={{ display:"flex", alignItems:"center", gap:10 }}>
+    <div style={{ width:36, height:36, borderRadius:10, backgroundColor:p.active?"#1e293b":"#e2e8f0", display:"flex", alignItems:"center", justifyContent:"center", fontSize:14, fontWeight:700, color:p.active?"#fff":"#94a3b8", flexShrink:0 }}>{p.name[0]}</div>
+    <div style={{ flex:1, minWidth:0 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+        <span style={{ fontSize:14, fontWeight:700, color:"#1e293b", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.name}</span>
+        {!p.active && <span style={{ fontSize:11, color:"#94a3b8", backgroundColor:"#f1f5f9", borderRadius:4, padding:"1px 6px", flexShrink:0 }}>Inactive</span>}
+      </div>
+      <div style={{ marginTop:3 }}><ClanBadge clan={p.clan}/></div>
+    </div>
+    <Btn onClick={() => onDelete(p)} variant="danger" size="sm">Delete</Btn>
+  </Card>
+);
+
 const DeletePlayerView = ({ onBack }) => {
   const { role, clan: sessionClan } = useSession();
   const [clan,     setClan]    = useState(role === "clan" ? sessionClan : "");
@@ -3058,20 +3083,6 @@ const DeletePlayerView = ({ onBack }) => {
     forceUpdate();
   };
 
-  const PlayerRow = ({ p }) => (
-    <Card style={{ display:"flex", alignItems:"center", gap:10 }}>
-      <div style={{ width:36, height:36, borderRadius:10, backgroundColor:p.active?"#1e293b":"#e2e8f0", display:"flex", alignItems:"center", justifyContent:"center", fontSize:14, fontWeight:700, color:p.active?"#fff":"#94a3b8", flexShrink:0 }}>{p.name[0]}</div>
-      <div style={{ flex:1, minWidth:0 }}>
-        <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-          <span style={{ fontSize:14, fontWeight:700, color:"#1e293b", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.name}</span>
-          {!p.active && <span style={{ fontSize:11, color:"#94a3b8", backgroundColor:"#f1f5f9", borderRadius:4, padding:"1px 6px", flexShrink:0 }}>Inactive</span>}
-        </div>
-        <div style={{ marginTop:3 }}><ClanBadge clan={p.clan}/></div>
-      </div>
-      <Btn onClick={()=>setDeleting(p)} variant="danger" size="sm">Delete</Btn>
-    </Card>
-  );
-
   return (
     <div style={{ padding:"0 16px 16px" }}>
       <BackBtn onBack={onBack}/>
@@ -3089,11 +3100,15 @@ const DeletePlayerView = ({ onBack }) => {
       <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
         {inactive.length > 0 && <>
           <div style={{ fontSize:11, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:"0.08em", marginTop:4 }}>Inactive ({inactive.length})</div>
-          {inactive.map(p => <PlayerRow key={p.id} p={p}/>)}
+          <div key={"inactive|" + clan + "|" + search} style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            {inactive.map(p => <DeletePlayerRow key={p.id} p={p} onDelete={setDeleting}/>)}
+          </div>
         </>}
         {active.length > 0 && <>
           <div style={{ fontSize:11, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:"0.08em", marginTop:inactive.length?12:4 }}>Active ({active.length})</div>
-          {active.map(p => <PlayerRow key={p.id} p={p}/>)}
+          <div key={"active|" + clan + "|" + search} style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            {active.map(p => <DeletePlayerRow key={p.id} p={p} onDelete={setDeleting}/>)}
+          </div>
         </>}
       </div>
       {deleting && (
@@ -3121,12 +3136,14 @@ const FragmentDistributionView = ({ onBack }) => {
   const [totalFrags,   setTotalFrags]   = useState("");
   const [winnerPct,    setWinnerPct]    = useState(33);
   const [chestPct,     setChestPct]     = useState(33);
+  const [olyScorePct,  setOlyScorePct]  = useState(50);
   const [tierValues,   setTierValues]   = useState([...DEFAULT_TIER_VALUES]);
   const [showAdv,      setShowAdv]      = useState(false);
   const [allocations,  setAllocations]  = useState([]);
   const [saved,        setSaved]        = useState(false);
 
   const damagePct      = 100 - winnerPct - chestPct;
+  const olyChestPct    = 100 - olyScorePct;
   const clanList       = role === "clan" ? [sessionClan] : CLANS;
   const allPlayers     = storage.getPlayers();
   const allScores      = storage.getScores();
@@ -3141,9 +3158,10 @@ const FragmentDistributionView = ({ onBack }) => {
     if (!n || n <= 0) return;
     const allocs = eventId === "omens"
       ? calcOmensFrags(latestEntry, allPlayers, clan, n, winnerPct, chestPct, tierValues)
-      : calcOlympusFrags(latestEntry, allPlayers, clan, n);
+      : calcOlympusFrags(latestEntry, allPlayers, clan, n, olyScorePct, olyChestPct);
     setAllocations(allocs);
     setStep(3);
+    scrollToTop();
   };
 
   const updateFinal = (playerId, val) =>
@@ -3154,7 +3172,7 @@ const FragmentDistributionView = ({ onBack }) => {
       id: uid(), clan, eventId, date: today(),
       scoreEntryDate: latestEntry?.date || today(),
       totalFragments: totalAvailable,
-      config: eventId === "omens" ? { winnerPct, chestPct, damagePct, tierValues } : null,
+      config: eventId === "omens" ? { winnerPct, chestPct, damagePct, tierValues } : { scorePct:olyScorePct, chestPct:olyChestPct },
       allocations,
     };
     storage.saveFragmentDistributions([dist, ...storage.getFragmentDistributions()]);
@@ -3196,7 +3214,7 @@ const FragmentDistributionView = ({ onBack }) => {
             No score entries found for {clan} — {eventId}. Enter scores first.
           </p>
         )}
-        <Btn onClick={()=>{ setStep(2); setSaved(false); setAllocations([]); }} variant="primary" size="lg" fullWidth disabled={!clan||!latestEntry}>
+        <Btn onClick={()=>{ setStep(2); setSaved(false); setAllocations([]); scrollToTop(); }} variant="primary" size="lg" fullWidth disabled={!clan||!latestEntry}>
           Continue →
         </Btn>
       </div>
@@ -3206,7 +3224,7 @@ const FragmentDistributionView = ({ onBack }) => {
   // ── Step 2: Configure ─────────────────────────────────────────────────────
   if (step === 2) return (
     <div style={{ padding:"0 16px 16px" }}>
-      <BackBtn onBack={()=>setStep(1)}/>
+      <BackBtn onBack={()=>{ setStep(1); scrollToTop(); }}/>
       <h2 style={{ fontSize:20, fontWeight:800, color:"#1e293b", margin:"0 0 4px" }}>Configure</h2>
       <p style={{ fontSize:13, color:"#64748b", margin:"0 0 20px" }}>{clan} · {eventId==="omens"?"Omens":"Olympus"} · {latestEntry?.date}</p>
       <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
@@ -3269,9 +3287,30 @@ const FragmentDistributionView = ({ onBack }) => {
         </>)}
 
         {eventId === "olympus" && (
-          <Card style={{ backgroundColor:"#f8fafc" }}>
-            <div style={{ fontSize:13, color:"#64748b" }}>Fragments distributed proportionally by Score — no additional configuration needed.</div>
-          </Card>
+          <div>
+            <Label>Pool Weightings <span style={{ textTransform:"none", fontWeight:400, color:"#94a3b8", fontSize:11 }}>must total 100%</span></Label>
+            <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+              {[
+                { label:"Score Pool %", val:olyScorePct, set:setOlyScorePct, color:"#3b82f6", hint:"Proportional to Score",  locked:false },
+                { label:"Chest Pool %", val:olyChestPct, set:null,           color:"#16a34a", hint:"Proportional to Chests — auto-computed remainder", locked:true },
+              ].map(pool => (
+                <div key={pool.label} style={{ backgroundColor:pool.locked?"#f8fafc":"#fff", borderRadius:10, padding:"10px 12px", border:`1.5px solid ${pool.locked?"#e2e8f0":pool.color+"55"}` }}>
+                  <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:3 }}>
+                    <span style={{ fontSize:13, fontWeight:700, color:"#1e293b" }}>{pool.label}</span>
+                    {pool.locked
+                      ? <span style={{ fontSize:16, fontWeight:800, fontFamily:"'DM Mono',monospace", color:pool.color }}>{pool.val}%</span>
+                      : <div style={{ display:"flex", alignItems:"center", gap:4 }}>
+                          <input type="number" min="0" max="100" value={pool.val} onChange={e=>pool.set(Math.max(0, Math.min(100, Number(e.target.value))))}
+                            style={{ width:54, padding:"4px 8px", borderRadius:6, border:"1.5px solid #e2e8f0", fontSize:14, fontWeight:700, textAlign:"center", fontFamily:"'DM Mono',monospace" }}/>
+                          <span style={{ fontSize:13, fontWeight:700, color:"#64748b" }}>%</span>
+                        </div>
+                    }
+                  </div>
+                  <div style={{ fontSize:11, color:"#94a3b8" }}>{pool.hint}</div>
+                </div>
+              ))}
+            </div>
+          </div>
         )}
 
         <Btn onClick={buildAllocations} variant="primary" size="lg" fullWidth
@@ -3288,7 +3327,7 @@ const FragmentDistributionView = ({ onBack }) => {
 
   return (
     <div style={{ padding:"0 16px 16px" }}>
-      <BackBtn onBack={()=>{ setStep(2); setSaved(false); }}/>
+      <BackBtn onBack={()=>{ setStep(2); setSaved(false); scrollToTop(); }}/>
       <h2 style={{ fontSize:20, fontWeight:800, color:"#1e293b", margin:"0 0 4px" }}>Review Allocation</h2>
       <p style={{ fontSize:12, color:"#64748b", margin:"0 0 12px" }}>{clan} · {eventId==="omens"?"Omens":"Olympus"} · {latestEntry?.date}</p>
 
@@ -3341,7 +3380,10 @@ const FragmentDistributionView = ({ onBack }) => {
                   <span style={{ fontSize:10, backgroundColor:"#fffbeb", color:"#d97706", borderRadius:4, padding:"2px 6px", fontWeight:600 }}>Damage {Number(a.damageScore).toLocaleString()}</span>
                   <span style={{ fontSize:10, backgroundColor:"#f0fdf4", color:"#16a34a", borderRadius:4, padding:"2px 6px", fontWeight:600 }}>Chests {a.chestScore}</span>
                 </div>
-              : <div style={{ fontSize:11, color:"#64748b" }}>Score: {Number(a.score).toLocaleString()}</div>
+              : <div style={{ display:"flex", gap:5, flexWrap:"wrap", marginTop:2 }}>
+                  <span style={{ fontSize:10, backgroundColor:"#eff6ff", color:"#3b82f6", borderRadius:4, padding:"2px 6px", fontWeight:600 }}>Score {Number(a.score).toLocaleString()} → {a.scoreFrags}</span>
+                  <span style={{ fontSize:10, backgroundColor:"#f0fdf4", color:"#16a34a", borderRadius:4, padding:"2px 6px", fontWeight:600 }}>Chests {Number(a.chestScore).toLocaleString()} → {a.chestFrags}</span>
+                </div>
             }
           </Card>
         ))}
@@ -3843,6 +3885,7 @@ const StackCalcScreen = () => {
       setError(err.message || "Could not reach the calculator. Check the URL and try again.");
     } finally {
       setLoading(false);
+      scrollToTop();
     }
   };
 
@@ -4275,7 +4318,7 @@ function App() {
       )}
       <PageHeader screen={activeScreen} onLogout={handleLogout}/>
       <div style={{ paddingBottom:80 }}>{screens[activeScreen]}</div>
-      <BottomNav active={activeScreen} onChange={setScreen} badge={total}/>
+      <BottomNav active={activeScreen} onChange={s=>{ setScreen(s); scrollToTop(); }} badge={total}/>
     </SessionCtx.Provider>
   );
 }
