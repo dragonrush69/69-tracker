@@ -1367,13 +1367,21 @@ const BulkPaste = ({ clan, event, onBack }) => {
     const all = storage.getScores();
     const key = `${clan}_${event.id}`;
     if (!all[key]) all[key] = [];
-    all[key].unshift({ date: new Date().toISOString(), scores: finalScores });
-    if (all[key].length > 3) all[key] = all[key].slice(0, 3);
+    const latest = all[key][0];
+    const isSameDay = latest && latest.date.slice(0,10) === today();
+    if (isSameDay) {
+      // Same calendar day as the latest entry — merge in (adds/updates players, keeps the rest)
+      all[key][0] = { ...latest, date: new Date().toISOString(), scores: { ...latest.scores, ...finalScores } };
+    } else {
+      all[key].unshift({ date: new Date().toISOString(), scores: finalScores });
+      if (all[key].length > 3) all[key] = all[key].slice(0, 3);
+    }
     window._appData.scores = all;
     saveToSheets(window._appData); // single atomic save
 
     setSaved(true);
-    setTimeout(() => { setSaved(false); onBack(); }, 1400);
+    scrollToTop();
+    setTimeout(() => { setSaved(false); onBack(); scrollToTop(); }, 1400);
   };
 
   const ScorePills = ({ scores }) => (
@@ -1581,7 +1589,11 @@ const ScoreEntryScreen = () => {
 
 const ScoreForm = ({ clan, event, onBack }) => {
   const players     = storage.getPlayers().filter(p=>p.clan===clan&&p.active);
-  const [scores,    setScores]    = useState({});
+  const scoreKey    = `${clan}_${event.id}`;
+  const existingEntries = storage.getScores()[scoreKey] || [];
+  const latestEntry      = existingEntries[0] || null;
+  const isSameDay   = latestEntry && latestEntry.date.slice(0,10) === today();
+  const [scores,    setScores]    = useState(() => isSameDay ? { ...(latestEntry.scores || {}) } : {});
   const [mode,      setMode]      = useState("manual");
   const [saved,     setSaved]     = useState(false);
   const [errors,    setErrors]    = useState({});
@@ -1626,10 +1638,15 @@ const ScoreForm = ({ clan, event, onBack }) => {
     if (errs === null)                 { setErrors({ _empty: true }); return; }
     if (Object.keys(errs).length > 0)  { setErrors(errs); return; }
     const all = storage.getScores();
-    const key = `${clan}_${event.id}`;
+    const key = scoreKey;
     if (!all[key]) all[key] = [];
-    all[key].unshift({ date: new Date().toISOString(), scores });
-    if (all[key].length > 3) all[key] = all[key].slice(0, 3);
+    if (isSameDay && all[key][0]) {
+      // Same calendar day as the latest entry — update it in place (merge in any new players)
+      all[key][0] = { ...all[key][0], date: new Date().toISOString(), scores };
+    } else {
+      all[key].unshift({ date: new Date().toISOString(), scores });
+      if (all[key].length > 3) all[key] = all[key].slice(0, 3);
+    }
     storage.saveScores(all);
     setSaved(true);
     scrollToTop();
