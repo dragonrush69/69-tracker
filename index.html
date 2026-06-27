@@ -324,7 +324,11 @@ const storage = {
 const uid   = () => Math.random().toString(36).slice(2, 9);
 const today = () => new Date().toISOString().slice(0, 10);
 const useForceUpdate = () => { const [,setN] = useState(0); return () => setN(n=>n+1); };
-const scrollToTop = () => { try { window.scrollTo({ top:0, left:0, behavior:"instant" }); } catch(_) { window.scrollTo(0,0); } };
+const scrollToTop = () => {
+  try { window.scrollTo({ top:0, left:0, behavior:"instant" }); } catch(_) {}
+  try { document.documentElement.scrollTop = 0; } catch(_) {}
+  try { document.body.scrollTop = 0; } catch(_) {}
+};
 
 // ─── FUZZY MATCH ──────────────────────────────────────────────────────────────
 const normalise = s => s.toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -3902,9 +3906,11 @@ const StackCalcScreen = () => {
       setError(err.message || "Could not reach the calculator. Check the URL and try again.");
     } finally {
       setLoading(false);
-      scrollToTop();
     }
   };
+
+  // Scroll to top after result renders, not during the fetch — ensures DOM is updated first
+  useEffect(() => { if (result) scrollToTop(); }, [result]);
 
   const copyToClipboard = () => {
     if (!result) return;
