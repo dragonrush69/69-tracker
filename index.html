@@ -325,9 +325,14 @@ const uid   = () => Math.random().toString(36).slice(2, 9);
 const today = () => new Date().toISOString().slice(0, 10);
 const useForceUpdate = () => { const [,setN] = useState(0); return () => setN(n=>n+1); };
 const scrollToTop = () => requestAnimationFrame(() => {
-  try { window.scrollTo({ top:0, left:0, behavior:"instant" }); } catch(_) {}
-  try { document.documentElement.scrollTop = 0; } catch(_) {}
-  try { document.body.scrollTop = 0; } catch(_) {}
+  const anchor = document.getElementById("scroll-top-anchor");
+  if (anchor) {
+    anchor.scrollIntoView({ behavior:"instant", block:"start" });
+  } else {
+    try { window.scrollTo({ top:0, left:0, behavior:"instant" }); } catch(_) {}
+    try { document.documentElement.scrollTop = 0; } catch(_) {}
+    try { document.body.scrollTop = 0; } catch(_) {}
+  }
 });
 
 // ─── FUZZY MATCH ──────────────────────────────────────────────────────────────
@@ -4294,6 +4299,7 @@ function App() {
 
   const shell = children => (
     <div style={{ maxWidth:430, margin:"0 auto", minHeight:"100vh", backgroundColor:"#f8fafc", fontFamily:"'Outfit','DM Sans',system-ui,sans-serif" }}>
+      <div id="scroll-top-anchor" style={{ position:"absolute", top:0, height:0, width:0, pointerEvents:"none" }}/>
       <style>{globalStyles}</style>
       {children}
     </div>
