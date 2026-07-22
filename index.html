@@ -4242,7 +4242,7 @@ const PageHeader = ({ screen, onLogout }) => {
 // ─── APP ROOT ─────────────────────────────────────────────────────────────────
 function App() {
   const [session,   setSession]   = useState(() => loadSession());
-  const [screen,    setScreen]    = useState("players");
+  const [screen,    setScreen]    = useState("stack");
   const [appReady,  setAppReady]  = useState(false);
   const [loadError, setLoadError] = useState(false);
   const forceUpdate = useForceUpdate();
@@ -4262,8 +4262,7 @@ function App() {
       } else {
         _ensure();
       }
-      // For user role, always land on Update Level
-      if (session.role === "user") setScreen("updateLevel");
+      // All roles land on Stack Calculator by default
       setAppReady(true);
     }
     init();
