@@ -4334,6 +4334,30 @@ function App() {
     };
   }, [session]);
 
+  // Active idle-timeout monitor — checks every 60s and on tab-focus
+  useEffect(() => {
+    if (!session) return;
+    const checkTimeout = () => {
+      try {
+        const s = JSON.parse(sessionStorage.getItem(SESSION_KEY));
+        if (!s) return;
+        const timeoutMs = getSessionTimeout() * 3_600_000;
+        if (Date.now() - (s.lastActivity || 0) > timeoutMs) {
+          saveSession(null);
+          setSession(null);
+          setAppReady(false);
+          setScreen("stack");
+        }
+      } catch {}
+    };
+    const interval = setInterval(checkTimeout, 60_000);
+    document.addEventListener("visibilitychange", checkTimeout);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", checkTimeout);
+    };
+  }, [session]);
+
   // Load data from Sheets once logged in
   useEffect(() => {
     if (!session) return;
