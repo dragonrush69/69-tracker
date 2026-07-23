@@ -106,7 +106,8 @@ function loadSession() {
     const navType = performance?.getEntriesByType?.("navigation")?.[0]?.type;
     if (navType === "navigate") return null;
     // Option 1: idle timeout — even on reload, re-prompt if inactive too long
-    const timeoutMs = getSessionTimeout() * 3_600_000;
+    const hrs = s.timeoutHrs || getSessionTimeout();
+    const timeoutMs = hrs * 3600000;
     if (Date.now() - (s.lastActivity || 0) > timeoutMs) {
       sessionStorage.removeItem(SESSION_KEY);
       return null;
@@ -115,7 +116,7 @@ function loadSession() {
   } catch { return null; }
 }
 function saveSession(s) {
-  if (s) sessionStorage.setItem(SESSION_KEY, JSON.stringify({ ...s, lastActivity: Date.now() }));
+  if (s) sessionStorage.setItem(SESSION_KEY, JSON.stringify({ ...s, lastActivity: Date.now(), timeoutHrs: getSessionTimeout() }));
   else sessionStorage.removeItem(SESSION_KEY);
 }
 
@@ -3683,6 +3684,11 @@ const AdminScreen = () => {
   const saveTimeout = () => {
     const val = Math.max(0.5, Number(timeoutHrs) || DEFAULT_TIMEOUT_HRS);
     saveSessionTimeout(val);
+    // Also stamp it into the live session so the active monitor uses it immediately
+    try {
+      const s = JSON.parse(sessionStorage.getItem(SESSION_KEY));
+      if (s) sessionStorage.setItem(SESSION_KEY, JSON.stringify({ ...s, timeoutHrs: val }));
+    } catch {}
     setTimeoutHrs(val);
     setTimeoutSaved(true);
     setTimeout(() => setTimeoutSaved(false), 2000);
@@ -4341,7 +4347,9 @@ function App() {
       try {
         const s = JSON.parse(sessionStorage.getItem(SESSION_KEY));
         if (!s) return;
-        const timeoutMs = getSessionTimeout() * 3_600_000;
+        // Read timeout from session object first — avoids localStorage reliability issues on desktop
+        const hrs = s.timeoutHrs || getSessionTimeout();
+        const timeoutMs = hrs * 3600000;
         if (Date.now() - (s.lastActivity || 0) > timeoutMs) {
           saveSession(null);
           setSession(null);
