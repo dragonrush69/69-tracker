@@ -87,13 +87,35 @@ function resolvePin(pin) {
 }
 
 // ─── SESSION ──────────────────────────────────────────────────────────────────
-const SESSION_KEY = "69ct_session";
+const SESSION_KEY         = "69ct_session";
+const SESSION_TIMEOUT_KEY = "69ct_session_timeout_hours";
+const DEFAULT_TIMEOUT_HRS = 2;
+
+function getSessionTimeout() {
+  try { const v = Number(localStorage.getItem(SESSION_TIMEOUT_KEY)); return v > 0 ? v : DEFAULT_TIMEOUT_HRS; } catch { return DEFAULT_TIMEOUT_HRS; }
+}
+function saveSessionTimeout(hours) {
+  try { localStorage.setItem(SESSION_TIMEOUT_KEY, String(hours)); } catch {}
+}
 
 function loadSession() {
-  try { return JSON.parse(sessionStorage.getItem(SESSION_KEY)); } catch { return null; }
+  try {
+    const s = JSON.parse(sessionStorage.getItem(SESSION_KEY));
+    if (!s) return null;
+    // Option 3: fresh URL navigation always requires PIN — reload/back-forward restores session
+    const navType = performance?.getEntriesByType?.("navigation")?.[0]?.type;
+    if (navType === "navigate") return null;
+    // Option 1: idle timeout — even on reload, re-prompt if inactive too long
+    const timeoutMs = getSessionTimeout() * 3_600_000;
+    if (Date.now() - (s.lastActivity || 0) > timeoutMs) {
+      sessionStorage.removeItem(SESSION_KEY);
+      return null;
+    }
+    return s;
+  } catch { return null; }
 }
 function saveSession(s) {
-  if (s) sessionStorage.setItem(SESSION_KEY, JSON.stringify(s));
+  if (s) sessionStorage.setItem(SESSION_KEY, JSON.stringify({ ...s, lastActivity: Date.now() }));
   else sessionStorage.removeItem(SESSION_KEY);
 }
 
@@ -793,6 +815,8 @@ const Icon = ({ name, size=22, color="currentColor" }) => {
     bell:       <svg {...s}><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>,
     calc:       <svg {...s}><rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="6" x2="16" y2="6"/><line x1="8" y1="10" x2="10" y2="10"/><line x1="14" y1="10" x2="16" y2="10"/><line x1="8" y1="14" x2="10" y2="14"/><line x1="14" y1="14" x2="16" y2="14"/><line x1="8" y1="18" x2="10" y2="18"/><line x1="14" y1="18" x2="16" y2="18"/></svg>,
     copy:       <svg {...s}><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>,
+    clock:      <svg {...s}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
+    info:       <svg {...s}><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>,
   };
   return icons[name] || null;
 };
@@ -3650,9 +3674,19 @@ const ChangePinView = ({ onBack }) => {
 const AdminScreen = () => {
   const [view,         setView]         = useState("home");
   const [clearConfirm, setClearConfirm] = useState(false);
+  const [timeoutHrs,   setTimeoutHrs]   = useState(() => getSessionTimeout());
+  const [timeoutSaved, setTimeoutSaved] = useState(false);
   const forceUpdate = useForceUpdate();
   const { role } = useSession();
   const isAdmin = role === "super";
+
+  const saveTimeout = () => {
+    const val = Math.max(0.5, Number(timeoutHrs) || DEFAULT_TIMEOUT_HRS);
+    saveSessionTimeout(val);
+    setTimeoutHrs(val);
+    setTimeoutSaved(true);
+    setTimeout(() => setTimeoutSaved(false), 2000);
+  };
 
   const doExport = () => {
     const data = {
@@ -3801,16 +3835,45 @@ const AdminScreen = () => {
       {isAdmin && (
       <div style={{ marginBottom:20 }}>
         <SecHeader title="Security"/>
-        <Card onClick={()=>setView("changePins")} style={{ display:"flex", alignItems:"center", gap:14 }}>
-          <div style={{ width:40, height:40, borderRadius:10, backgroundColor:"#0ea5e915", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
-            <Icon name="shield" size={19} color="#0ea5e9"/>
-          </div>
-          <div style={{ flex:1 }}>
-            <div style={{ fontSize:14, fontWeight:600, color:"#1e293b" }}>Change PINs</div>
-            <div style={{ fontSize:12, color:"#94a3b8", marginTop:1 }}>Update login PIN for any role</div>
-          </div>
-          <Icon name="chevR" size={16} color="#cbd5e1"/>
-        </Card>
+        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          <Card onClick={()=>setView("changePins")} style={{ display:"flex", alignItems:"center", gap:14 }}>
+            <div style={{ width:40, height:40, borderRadius:10, backgroundColor:"#0ea5e915", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+              <Icon name="shield" size={19} color="#0ea5e9"/>
+            </div>
+            <div style={{ flex:1 }}>
+              <div style={{ fontSize:14, fontWeight:600, color:"#1e293b" }}>Change PINs</div>
+              <div style={{ fontSize:12, color:"#94a3b8", marginTop:1 }}>Update login PIN for any role</div>
+            </div>
+            <Icon name="chevR" size={16} color="#cbd5e1"/>
+          </Card>
+          <Card>
+            <div style={{ display:"flex", alignItems:"center", gap:14, marginBottom:10 }}>
+              <div style={{ width:40, height:40, borderRadius:10, backgroundColor:"#f59e0b15", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+                <Icon name="clock" size={19} color="#f59e0b"/>
+              </div>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:14, fontWeight:600, color:"#1e293b" }}>Session Timeout</div>
+                <div style={{ fontSize:12, color:"#94a3b8", marginTop:1 }}>Auto-logout after inactivity</div>
+              </div>
+            </div>
+            <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+              <input
+                type="number" min="0.5" step="0.5"
+                value={timeoutHrs}
+                onChange={e => setTimeoutHrs(e.target.value)}
+                style={{ width:80, padding:"8px 12px", borderRadius:8, border:"1.5px solid #e2e8f0", fontSize:15, fontWeight:700, fontFamily:"'DM Mono',monospace", color:"#1e293b", textAlign:"right" }}
+              />
+              <span style={{ fontSize:13, fontWeight:600, color:"#64748b" }}>hours</span>
+              <button onClick={saveTimeout}
+                style={{ marginLeft:"auto", padding:"8px 18px", borderRadius:8, border:"none", backgroundColor: timeoutSaved ? "#16a34a" : "#1e293b", color:"#fff", fontSize:13, fontWeight:700, cursor:"pointer" }}>
+                {timeoutSaved ? "Saved ✓" : "Save"}
+              </button>
+            </div>
+            <div style={{ fontSize:11, color:"#94a3b8", marginTop:8 }}>
+              Current setting: {getSessionTimeout()} hour{getSessionTimeout()!==1?"s":""} — applies to all roles
+            </div>
+          </Card>
+        </div>
       </div>
       )}
 
@@ -4251,6 +4314,25 @@ function App() {
   const [appReady,  setAppReady]  = useState(false);
   const [loadError, setLoadError] = useState(false);
   const forceUpdate = useForceUpdate();
+
+  // Update lastActivity on any user interaction so idle timeout is accurate
+  useEffect(() => {
+    if (!session) return;
+    const touch = () => {
+      try {
+        const s = JSON.parse(sessionStorage.getItem(SESSION_KEY));
+        if (s) sessionStorage.setItem(SESSION_KEY, JSON.stringify({ ...s, lastActivity: Date.now() }));
+      } catch {}
+    };
+    window.addEventListener("click",      touch);
+    window.addEventListener("touchstart", touch, { passive: true });
+    window.addEventListener("keydown",    touch);
+    return () => {
+      window.removeEventListener("click",      touch);
+      window.removeEventListener("touchstart", touch);
+      window.removeEventListener("keydown",    touch);
+    };
+  }, [session]);
 
   // Load data from Sheets once logged in
   useEffect(() => {
