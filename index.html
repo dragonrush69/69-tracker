@@ -2,11 +2,27 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8"/>
+  <script>
+    // DEPLOY_VERSION — bump this string every time you push new code to GitHub Pages.
+    // On the next pull-to-refresh, browsers navigate to a versioned URL (?dv=X),
+    // which is never in cache, so they always fetch the latest HTML.
+    (function() {
+      var V = "3";
+      var p = new URLSearchParams(location.search);
+      if (p.get("dv") !== V) {
+        p.set("dv", V);
+        location.replace(location.pathname + "?" + p.toString());
+      }
+    })();
+  </script>
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
   <meta name="mobile-web-app-capable" content="yes"/>
   <meta name="apple-mobile-web-app-capable" content="yes"/>
   <meta name="apple-mobile-web-app-status-bar-style" content="default"/>
   <meta name="apple-mobile-web-app-title" content="69 Tracker"/>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate"/>
+  <meta http-equiv="Pragma" content="no-cache"/>
+  <meta http-equiv="Expires" content="0"/>
   <title>69 Tracker</title>
   <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
@@ -22,62 +38,56 @@
   <script type="text/babel">
 const { useState, useRef, useEffect, createContext, useContext } = React;
 
-// ─── PIN CONFIG ───────────────────────────────────────────────────────────────
-// Change these PINs before publishing!
-const PINS = {
-  super:  "9999",   // full access — all clans + Admin
-  "69R":  "6969",   // 69R officers — own clan only
-  "69S":  "6996",   // 69S officers — own clan only
-  "69D":  "9669",   // 69D officers — own clan only
-  user:   "1234",   // members — Update Level only
-};
-
-// ─── PIN STORAGE ──────────────────────────────────────────────────────────────
-// PINs are loaded from Google Sheets on app startup (stored in window._appData.pins).
-// localStorage is used as a fast local cache so resolvePin works before Sheets loads.
-// When a PIN is changed, it's saved to both localStorage AND Sheets immediately.
-const PIN_STORAGE_KEY = "69ct_pins";
+// ─── PIN SYSTEM ───────────────────────────────────────────────────────────────
+// PINs are loaded exclusively from Google Sheets (window._appData.pins).
+// There are NO hardcoded fallback PINs — if Sheets hasn't loaded, login is blocked.
+// The backend (AppScript_Backend.js) stores DEFAULT_PINS in A21 on first run,
+// so Sheets will always return valid PINs once it's reachable.
 
 function getActivePins() {
-  // Prefer Sheets-loaded PINs (most up-to-date across devices)
+  // PINs come exclusively from Sheets data already in memory.
+  // Returns null if Sheets hasn't been loaded yet — callers must handle this.
   const sheetPins = window._appData?.pins;
-  // Fall back to localStorage cache, then hardcoded defaults
-  let stored = {};
-  try { stored = JSON.parse(localStorage.getItem(PIN_STORAGE_KEY)) || {}; } catch {}
-  const base = sheetPins || stored;
+  if (!sheetPins) return null;
   return {
-    super:  base.super  || PINS.super,
-    "69R":  base["69R"] || PINS["69R"],
-    "69S":  base["69S"] || PINS["69S"],
-    "69D":  base["69D"] || PINS["69D"],
-    user:   base.user   || PINS.user,
+    super:  sheetPins.super  || "",
+    "69R":  sheetPins["69R"] || "",
+    "69S":  sheetPins["69S"] || "",
+    "69D":  sheetPins["69D"] || "",
+    user:   sheetPins.user   || "",
   };
 }
 
-function savePinToStorage(key, pin) {
-  // 1. Update localStorage cache immediately
-  try {
-    const stored = JSON.parse(localStorage.getItem(PIN_STORAGE_KEY)) || {};
-    stored[key] = pin;
-    localStorage.setItem(PIN_STORAGE_KEY, JSON.stringify(stored));
-  } catch {}
-  // 2. Update in-memory data
+async function savePinToStorage(key, pin) {
+  // Merge the change into ALL existing pins (never lose other PINs)
+  const existing = window._appData?.pins || {};
+  const allPins = { ...existing, [key]: pin, pinsChangedAt: Date.now() };
   if (!window._appData) window._appData = {};
-  if (!window._appData.pins) window._appData.pins = { ...getActivePins() };
-  window._appData.pins[key] = pin;
-  // 3. Persist to Sheets (send only the pins field to avoid overwriting scores)
+  window._appData.pins = allPins;
+
+  // Use a readable GET request so we can verify the write succeeded.
+  // (no-cors POST is fire-and-forget — we can't detect failures.)
   if (sheetsEnabled()) {
-    fetch(SHEETS_URL, {
-      method: "POST",
-      mode: "no-cors",
-      headers: { "Content-Type": "text/plain" },
-      body: JSON.stringify({ pins: window._appData.pins }),
-    }).catch(err => console.warn("PIN save to Sheets failed:", err));
+    try {
+      const url = SHEETS_URL
+        + "?action=savePins"
+        + "&pins=" + encodeURIComponent(JSON.stringify(allPins))
+        + "&t=" + Date.now();
+      const resp = await fetch(url);
+      const data = await resp.json();
+      if (!data.ok) throw new Error(data.error || "Server returned error");
+      console.log("PINs saved to Sheets ✓");
+    } catch (err) {
+      console.warn("PIN save to Sheets failed:", err);
+      alert("Warning: PIN change saved in memory but could not reach the server.\nOther devices won't see the change until you try again.");
+    }
   }
 }
 
 function resolvePin(pin) {
+  if (!pin) return null;
   const p = getActivePins();
+  if (!p) return null; // Sheets not yet loaded — block login
   if (pin === p.super)  return { role:"super",   clan:null  };
   if (pin === p["69R"]) return { role:"clan",    clan:"69R" };
   if (pin === p["69S"]) return { role:"clan",    clan:"69S" };
@@ -90,6 +100,9 @@ function resolvePin(pin) {
 const SESSION_KEY         = "69ct_session";
 const SESSION_TIMEOUT_KEY = "69ct_session_timeout_hours";
 const DEFAULT_TIMEOUT_HRS = 2;
+// Bump SESSION_VERSION to immediately invalidate ALL existing sessions across every device.
+// Current sessions lacking this version number are rejected on load.
+const SESSION_VERSION = 2;
 
 function getSessionTimeout() {
   try { const v = Number(localStorage.getItem(SESSION_TIMEOUT_KEY)); return v > 0 ? v : DEFAULT_TIMEOUT_HRS; } catch { return DEFAULT_TIMEOUT_HRS; }
@@ -102,9 +115,11 @@ function loadSession() {
   try {
     const s = JSON.parse(sessionStorage.getItem(SESSION_KEY));
     if (!s) return null;
-    // Option 3: fresh URL navigation always requires PIN — reload/back-forward restores session
+    // Reject sessions from older app versions (forces re-login after a SESSION_VERSION bump)
+    if (s.sessionVersion !== SESSION_VERSION) { sessionStorage.removeItem(SESSION_KEY); return null; }
+    // Any navigation or reload requires re-entering PIN
     const navType = performance?.getEntriesByType?.("navigation")?.[0]?.type;
-    if (navType === "navigate") return null;
+    if (navType === "navigate" || navType === "reload") return null;
     // Option 1: idle timeout — even on reload, re-prompt if inactive too long
     const hrs = s.timeoutHrs || getSessionTimeout();
     const timeoutMs = hrs * 3600000;
@@ -116,7 +131,7 @@ function loadSession() {
   } catch { return null; }
 }
 function saveSession(s) {
-  if (s) sessionStorage.setItem(SESSION_KEY, JSON.stringify({ ...s, lastActivity: Date.now(), timeoutHrs: getSessionTimeout() }));
+  if (s) sessionStorage.setItem(SESSION_KEY, JSON.stringify({ ...s, lastActivity: Date.now(), timeoutHrs: getSessionTimeout(), sessionVersion: SESSION_VERSION }));
   else sessionStorage.removeItem(SESSION_KEY);
 }
 
@@ -132,8 +147,9 @@ const LoginScreen = ({ onLogin }) => {
   const submit = (finalPin) => {
     const session = resolvePin(finalPin);
     if (session) {
-      saveSession(session);
-      onLogin(session);
+      const sessionWithTime = { ...session, loginAt: Date.now(), pinHash: btoa(finalPin) };
+      saveSession(sessionWithTime);
+      onLogin(sessionWithTime);
     } else {
       setError(true);
       setShake(true);
@@ -3812,11 +3828,11 @@ const ChangePinView = ({ onBack }) => {
 
   const reset = (key) => { setSelected(key); setPin1(""); setPin2(""); setSaved(false); setErr(""); };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     setErr("");
     if (!/^\d{4}$/.test(pin1))  { setErr("PIN must be exactly 4 digits."); return; }
     if (pin1 !== pin2)           { setErr("PINs don't match — please re-enter."); return; }
-    savePinToStorage(selected, pin1);
+    await savePinToStorage(selected, pin1);
     setSaved(true);
     setPin1("");
     setPin2("");
@@ -4585,11 +4601,49 @@ const PageHeader = ({ screen, onLogout }) => {
 
 // ─── APP ROOT ─────────────────────────────────────────────────────────────────
 function App() {
-  const [session,   setSession]   = useState(() => loadSession());
-  const [screen,    setScreen]    = useState("stack");
-  const [appReady,  setAppReady]  = useState(false);
-  const [loadError, setLoadError] = useState(false);
+  const [session,    setSession]    = useState(null); // session lives in memory only — every page load requires PIN
+  const [screen,     setScreen]     = useState("stack");
+  const [appReady,   setAppReady]   = useState(false);
+  const [loadError,  setLoadError]  = useState(false);
+  const [preloading,   setPreloading]   = useState(false);
+  const [preloadError, setPreloadError] = useState(false);
   const forceUpdate = useForceUpdate();
+
+  // Pre-load Sheets data before showing the login screen so PINs are always fresh.
+  // Retries up to 3 times (handles Apps Script cold starts). If all attempts fail,
+  // shows an error screen with a "Try Again" button — login is blocked until Sheets loads.
+  useEffect(() => {
+    if (session) return;          // Already logged in — main effect handles it
+    if (!sheetsEnabled()) return; // No Sheets configured
+    let cancelled = false;
+    setPreloading(true);
+    setPreloadError(false);
+
+    const tryLoad = async (attempt) => {
+      if (cancelled) return;
+      try {
+        const data = await loadFromSheets();
+        if (cancelled) return;
+        if (data && !data.error) {
+          window._appData = data;
+          setPreloading(false);
+          return;
+        }
+      } catch (_) {}
+      if (cancelled) return;
+      if (attempt < 3) {
+        // Retry with backoff: 3s, 6s
+        await new Promise(r => setTimeout(r, attempt * 3000));
+        tryLoad(attempt + 1);
+      } else {
+        setPreloading(false);
+        setPreloadError(true);
+      }
+    };
+
+    tryLoad(1);
+    return () => { cancelled = true; };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Update lastActivity on any user interaction so idle timeout is accurate
   useEffect(() => {
@@ -4644,6 +4698,22 @@ function App() {
         const data = await loadFromSheets();
         if (data && !data.error) {
           window._appData = data;
+          // Verify the PIN for this session's role still matches what's in Sheets.
+          // This catches PIN changes on any device — no extra POST needed.
+          // pinHash is set when the user logs in (btoa of their PIN).
+          if (session?.pinHash) {
+            const p = getActivePins(); // now populated from the freshly-loaded Sheets data
+            let currentPin;
+            if (session.role === "super") currentPin = p?.super;
+            else if (session.role === "clan") currentPin = p?.[session.clan];
+            else if (session.role === "user") currentPin = p?.user;
+            if (currentPin && atob(session.pinHash) !== currentPin) {
+              saveSession(null);
+              setSession(null);
+              setAppReady(false);
+              return;
+            }
+          }
         } else {
           _ensure();
           setLoadError(true);
@@ -4689,8 +4759,35 @@ function App() {
     </div>
   );
 
-  // Not logged in — show PIN screen (no session context needed here)
-  if (!session) return shell(<SessionCtx.Provider value={{ role:"none", clan:null }}><LoginScreen onLogin={handleLogin}/></SessionCtx.Provider>);
+  // Not logged in — fetch latest Sheets data first (so PINs are always fresh)
+  if (!session) {
+    if (preloading) return shell(
+      <SessionCtx.Provider value={{ role:"none", clan:null }}>
+        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", minHeight:"100vh", gap:12 }}>
+          <div style={{ width:52, height:52, borderRadius:14, backgroundColor:"#1e293b", display:"flex", alignItems:"center", justifyContent:"center" }}>
+            <Icon name="trophy" size={24} color="#f59e0b"/>
+          </div>
+          <div style={{ fontSize:13, fontWeight:600, color:"#94a3b8", letterSpacing:"0.05em" }}>Connecting…</div>
+        </div>
+      </SessionCtx.Provider>
+    );
+    if (preloadError) return shell(
+      <SessionCtx.Provider value={{ role:"none", clan:null }}>
+        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", minHeight:"100vh", gap:16, padding:24, textAlign:"center" }}>
+          <div style={{ width:52, height:52, borderRadius:14, backgroundColor:"#1e293b", display:"flex", alignItems:"center", justifyContent:"center" }}>
+            <Icon name="trophy" size={24} color="#f59e0b"/>
+          </div>
+          <div style={{ fontSize:15, fontWeight:700, color:"#dc2626" }}>Unable to connect</div>
+          <div style={{ fontSize:13, color:"#64748b", maxWidth:260 }}>Check your signal and try again.</div>
+          <button
+            onClick={() => window.location.reload()}
+            style={{ marginTop:4, padding:"10px 28px", backgroundColor:"#1e293b", color:"#fff", border:"none", borderRadius:10, fontSize:14, fontWeight:600, cursor:"pointer" }}
+          >Try Again</button>
+        </div>
+      </SessionCtx.Provider>
+    );
+    return shell(<SessionCtx.Provider value={{ role:"none", clan:null }}><LoginScreen onLogin={handleLogin}/></SessionCtx.Provider>);
+  }
 
   // Loading data after login
   if (!appReady) return shell(
