@@ -195,7 +195,7 @@ const LoginScreen = ({ onLogin }) => {
 
 // ─── GOOGLE SHEETS CONFIG ────────────────────────────────────────────────────
 // Paste your Apps Script Web App URL here after deploying:
-const SHEETS_URL = "https://script.google.com/macros/s/AKfycbwqrHBGl-ZaVNg5lJyTQ6mujjFRhaNl0UF2a-OnPy1tSUkq5r94WrzLYVdoirwIg0wa/exec";
+const SHEETS_URL = "https://script.google.com/macros/s/AKfycbzOocA5ZEf-_IJ-6ZlugbPsFj7penGfEk-P6kl7-1c8Ja62IR5tDRNkuDZB70rK-zES/exec";
 
 // ─── STACK CALCULATOR CONFIG ──────────────────────────────────────────────────
 // Paste the Apps Script Web App URL from your STACKING CALCULATOR spreadsheet:
@@ -207,7 +207,7 @@ const sheetsEnabled = () => SHEETS_URL && !SHEETS_URL.startsWith("YOUR_");
 async function loadFromSheets() {
   if (!sheetsEnabled()) return null;
   try {
-    const res = await fetch(SHEETS_URL, { redirect: "follow" });
+    const res = await fetch(SHEETS_URL + "?t=" + Date.now(), { redirect: "follow" });
     if (!res.ok) throw new Error("HTTP " + res.status);
     return await res.json();
   } catch (err) {
@@ -248,7 +248,27 @@ async function saveToSheets(data) {
 
 const CLANS = ["69R", "69S", "69D"];
 
+// Trigger ChestTracker sync via Apps Script and reload app data
+async function syncFromCT() {
+  if (!sheetsEnabled()) throw new Error("Sheets not configured");
+  const res = await fetch(SHEETS_URL, {
+    method: "POST",
+    redirect: "follow",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify({ action: "syncEpicChests" }),
+  });
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  const result = await res.json();
+  if (result.success) {
+    // Reload fresh data so ctSync/scores update in-memory
+    const fresh = await loadFromSheets();
+    if (fresh && !fresh.error) window._appData = fresh;
+  }
+  return result;
+}
+
 const EVENT_TYPES = [
+  { id:"epic_chests",   name:"Epic Chests",   frequency:"Weekly",  fields:[{ key:"score",   label:"Epics"   }], autoSync:true, autoSyncClan:"69R" },
   { id:"weekly_chests", name:"Weekly Chests", frequency:"7 days",  fields:[{ key:"points",  label:"Points"  }] },
   { id:"tin_man",       name:"Tin Man",       frequency:"6 days",  fields:[{ key:"points",  label:"Points"  }] },
   { id:"ragnarok",      name:"Ragnarök",      frequency:"25 days", fields:[{ key:"points",  label:"Points"  }] },
@@ -316,6 +336,8 @@ const storage = {
   getRotationLog:            () => window._appData?.rotationLog            || [],
   getFragmentDistributions:  () => window._appData?.fragmentDistributions   || [],
   getLastBackup:             ()  => window._appData?.lastBackup             || null,
+  getCtSync:                 ()  => window._appData?.ctSync                 || {},
+  getCtAliases:              ()  => window._appData?.ctAliases              || {},
 
   savePlayers: v => {
     _ensure(); window._appData.players = v;
@@ -818,6 +840,8 @@ const Icon = ({ name, size=22, color="currentColor" }) => {
     copy:       <svg {...s}><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>,
     clock:      <svg {...s}><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
     info:       <svg {...s}><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>,
+    sync:       <svg {...s}><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>,
+    link:       <svg {...s}><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>,
   };
   return icons[name] || null;
 };
@@ -1566,6 +1590,179 @@ const BulkPaste = ({ clan, event, onBack }) => {
   );
 };
 
+// ─── EPIC CHESTS VIEW (auto-synced from ChestTracker) ────────────────────────
+const EpicChestsView = ({ clan, event, onBack }) => {
+  const { role } = useSession();
+  const isSuper = role === "super";
+  const players = storage.getPlayers().filter(p => p.clan === clan && p.active);
+  const scores  = storage.getScores();
+  const scoreKey = `${clan}_${event.id}`;
+  const entries  = scores[scoreKey] || [];
+  const latest   = entries[0] || null;
+
+  const [aliasMap,  setAliasMap]  = useState({});
+  const [syncing,   setSyncing]   = useState(false);
+  const [syncMsg,   setSyncMsg]   = useState("");
+  const [saving,    setSaving]    = useState(false);
+  const [, forceUpdate] = useState(0);
+
+  const ctSync    = storage.getCtSync()[clan] || {};
+  const ctAliases = storage.getCtAliases()[clan] || {};
+  const unmatched = ctSync.unmatched || [];
+
+  const fmtDate = ts => {
+    if (!ts) return "Never";
+    const d = new Date(ts);
+    return d.toLocaleDateString("en-GB", { weekday:"short", day:"numeric", month:"short" }) +
+           " at " + d.toLocaleTimeString("en-GB", { hour:"2-digit", minute:"2-digit" });
+  };
+
+  const handleSyncNow = async () => {
+    setSyncing(true); setSyncMsg("");
+    try {
+      const result = await syncFromCT();
+      if (result.success) {
+        setSyncMsg(`Synced! ${result.matched} matched · ${result.unmatched} unmatched.`);
+        forceUpdate(n => n + 1);
+      } else {
+        setSyncMsg("Sync failed: " + (result.error || "Unknown error"));
+      }
+    } catch (e) {
+      setSyncMsg("Error: " + e.message);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleSaveAliases = async () => {
+    if (!Object.keys(aliasMap).length) return;
+    setSaving(true);
+    try {
+      const existing = storage.getCtAliases();
+      const updated  = { ...existing, [clan]: { ...(existing[clan] || {}), ...aliasMap } };
+      if (!window._appData) window._appData = {};
+      window._appData.ctAliases = updated;
+      await saveToSheets(window._appData);
+      setAliasMap({});
+      setSyncMsg("Mappings saved — they will apply on next sync.");
+      forceUpdate(n => n + 1);
+    } catch (e) {
+      setSyncMsg("Save failed: " + e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const playerScores = players
+    .map(p => ({ player:p, epics: latest?.scores?.[p.id]?.score ?? null }))
+    .sort((a,b) => (b.epics ?? -1) - (a.epics ?? -1));
+
+  const linkBg   = c => c ? "#f0fdf4" : "#fff";
+  const linkBdr  = c => c ? "1.5px solid #bbf7d0" : "1px solid #e2e8f0";
+
+  return (
+    <div>
+      <BackBtn onBack={onBack}/>
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14 }}>
+        <ClanBadge clan={clan}/>
+        <span style={{ fontSize:15, fontWeight:600, color:"#1e293b" }}>{event.name}</span>
+        <span style={{ fontSize:11, fontWeight:700, backgroundColor:"#0ea5e9", color:"#fff", borderRadius:6, padding:"2px 8px", letterSpacing:"0.04em" }}>AUTO</span>
+      </div>
+
+      {/* Sync status card */}
+      <Card style={{ marginBottom:14 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+          <div style={{ width:38, height:38, borderRadius:10, backgroundColor:"#f0f9ff", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+            <Icon name="sync" size={18} color="#0ea5e9"/>
+          </div>
+          <div style={{ flex:1 }}>
+            <div style={{ fontSize:13, fontWeight:700, color:"#1e293b" }}>ChestTracker Sync</div>
+            <div style={{ fontSize:12, color:"#64748b", marginTop:2 }}>Last synced: {fmtDate(ctSync.lastSync)}</div>
+            {ctSync.lastSync && (
+              <div style={{ fontSize:11, color:"#94a3b8", marginTop:1 }}>
+                {ctSync.matched ?? 0} matched · {(ctSync.unmatched || []).length} unmatched
+              </div>
+            )}
+          </div>
+          {isSuper && (
+            <button onClick={handleSyncNow} disabled={syncing} style={{ padding:"7px 14px", borderRadius:8, border:"none", backgroundColor:syncing?"#94a3b8":"#0ea5e9", color:"#fff", fontSize:12, fontWeight:700, cursor:syncing?"not-allowed":"pointer", display:"flex", alignItems:"center", gap:5 }}>
+              <Icon name="sync" size={13} color="#fff"/>
+              {syncing ? "Syncing…" : "Sync Now"}
+            </button>
+          )}
+        </div>
+        {syncMsg && <div style={{ fontSize:12, color:"#475569", marginTop:8, padding:"7px 10px", backgroundColor:"#f8fafc", borderRadius:7, border:"1px solid #e2e8f0" }}>{syncMsg}</div>}
+      </Card>
+
+      {/* Player list */}
+      {!latest ? (
+        <div style={{ textAlign:"center", padding:"36px 0", color:"#94a3b8", fontSize:14 }}>
+          No data yet — runs automatically every Sunday at 10pm.
+        </div>
+      ) : (
+        <div style={{ marginBottom:16 }}>
+          <SecHeader title={`Epic Chests · Week ending ${latest.date?.slice(0,10) || ""}`}/>
+          <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+            {playerScores.map(({ player, epics }, i) => (
+              <div key={player.id} style={{ backgroundColor:"#fff", borderRadius:10, padding:"10px 14px", display:"flex", alignItems:"center", gap:10, boxShadow:"0 1px 3px rgba(0,0,0,0.05),0 0 0 1px rgba(0,0,0,0.04)" }}>
+                <span style={{ fontSize:12, fontWeight:700, color:"#94a3b8", width:22, textAlign:"right", fontFamily:"'DM Mono',monospace" }}>#{i+1}</span>
+                <div style={{ flex:1, fontSize:14, fontWeight:600, color: epics !== null ? "#1e293b" : "#94a3b8" }}>{player.name}</div>
+                <span style={{ fontSize:16, fontWeight:800, color:"#0ea5e9", fontFamily:"'DM Mono',monospace" }}>
+                  {epics !== null ? epics : "—"}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Unmatched players (super admin only) */}
+      {isSuper && unmatched.length > 0 && (
+        <div style={{ marginBottom:16 }}>
+          <SecHeader title={`Unmatched Players (${unmatched.length})`}/>
+          <Card>
+            <p style={{ fontSize:12, color:"#64748b", margin:"0 0 12px" }}>
+              These ChestTracker names didn't match any 69R player. Link them so the next sync picks them up:
+            </p>
+            <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+              {unmatched.map(um => {
+                const linkedId = aliasMap[um.name] ?? ctAliases[um.name] ?? "";
+                return (
+                  <div key={um.name} style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 10px", borderRadius:8, backgroundColor:linkBg(linkedId), border:linkBdr(linkedId) }}>
+                    <div style={{ flex:1 }}>
+                      <span style={{ fontSize:13, fontWeight:700, color:"#1e293b" }}>{um.name}</span>
+                      <span style={{ fontSize:11, color:"#94a3b8", marginLeft:6 }}>{um.epics} epics</span>
+                    </div>
+                    <select value={aliasMap[um.name] ?? ctAliases[um.name] ?? ""}
+                      onChange={e => setAliasMap(prev => ({ ...prev, [um.name]: e.target.value }))}
+                      style={{ padding:"5px 8px", borderRadius:7, border:"1.5px solid #e2e8f0", fontSize:12, color:"#1e293b", backgroundColor:"#fff" }}>
+                      <option value="">— not linked —</option>
+                      {players.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                  </div>
+                );
+              })}
+            </div>
+            <button onClick={handleSaveAliases}
+              disabled={saving || !Object.keys(aliasMap).length}
+              style={{ marginTop:12, width:"100%", padding:"10px", borderRadius:8, border:"none", backgroundColor: saving || !Object.keys(aliasMap).length ? "#e2e8f0" : "#1e293b", color: saving || !Object.keys(aliasMap).length ? "#94a3b8" : "#fff", fontSize:14, fontWeight:700, cursor: !Object.keys(aliasMap).length ? "not-allowed" : "pointer" }}>
+              <Icon name="link" size={15} color={!Object.keys(aliasMap).length ? "#94a3b8" : "#fff"}/>{" "}
+              {saving ? "Saving…" : "Save Mappings"}
+            </button>
+          </Card>
+        </div>
+      )}
+
+      {isSuper && unmatched.length === 0 && latest && (
+        <div style={{ fontSize:12, color:"#16a34a", textAlign:"center", padding:"8px 0" }}>
+          All players matched ✓
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ─── SCORE ENTRY SCREEN ───────────────────────────────────────────────────────
 const ScoreEntryScreen = () => {
   const { role, clan: sessionClan } = useSession();
@@ -1600,13 +1797,19 @@ const ScoreEntryScreen = () => {
           <BackBtn onBack={()=>setSelClan(null)}/>
           <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:16 }}><ClanBadge clan={selClan}/><span style={{ fontSize:15, fontWeight:600, color:"#1e293b" }}>Select Event</span></div>
           <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-            {EVENT_TYPES.map(ev=>(
+            {EVENT_TYPES.filter(ev => !ev.autoSyncClan || ev.autoSyncClan === selClan).map(ev=>(
               <Card key={ev.id} onClick={()=>setSelEvent(ev)} style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
                 <div>
-                  <div style={{ fontSize:15, fontWeight:700, color:"#1e293b" }}>{ev.name}</div>
+                  <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                    <span style={{ fontSize:15, fontWeight:700, color:"#1e293b" }}>{ev.name}</span>
+                    {ev.autoSync && <span style={{ fontSize:10, fontWeight:700, backgroundColor:"#0ea5e9", color:"#fff", borderRadius:5, padding:"1px 6px" }}>AUTO</span>}
+                  </div>
                   <div style={{ display:"flex", alignItems:"center", gap:8, marginTop:6 }}>
                     <FreqTag freq={ev.frequency}/>
-                    <span style={{ fontSize:12, color:"#94a3b8" }}>{ev.fields.map(f=>f.label).join(" · ")}</span>
+                    {ev.autoSync
+                      ? <span style={{ fontSize:12, color:"#0ea5e9", fontWeight:600 }}>ChestTracker</span>
+                      : <span style={{ fontSize:12, color:"#94a3b8" }}>{ev.fields.map(f=>f.label).join(" · ")}</span>
+                    }
                   </div>
                 </div>
                 <Icon name="chevR" size={18} color="#cbd5e1"/>
@@ -1614,6 +1817,8 @@ const ScoreEntryScreen = () => {
             ))}
           </div>
         </>
+      ) : selEvent.autoSync ? (
+        <EpicChestsView clan={selClan} event={selEvent} onBack={()=>setSelEvent(null)}/>
       ) : (
         <ScoreForm clan={selClan} event={selEvent} onBack={()=>setSelEvent(null)}/>
       )}
@@ -3671,6 +3876,64 @@ const ChangePinView = ({ onBack }) => {
   );
 };
 
+// ─── ADMIN CT SYNC CARD ───────────────────────────────────────────────────────
+const AdminCtSyncCard = () => {
+  const [syncing,  setSyncing]  = useState(false);
+  const [msg,      setMsg]      = useState("");
+  const [, refresh] = useState(0);
+  const ctSync = storage.getCtSync()["69R"] || {};
+  const fmtDate = ts => {
+    if (!ts) return "Never";
+    const d = new Date(ts);
+    return d.toLocaleDateString("en-GB", { weekday:"short", day:"numeric", month:"short" }) +
+           " at " + d.toLocaleTimeString("en-GB", { hour:"2-digit", minute:"2-digit" });
+  };
+  const handleSync = async () => {
+    setSyncing(true); setMsg("");
+    try {
+      const result = await syncFromCT();
+      if (result.success) {
+        setMsg(`Done — ${result.matched} matched, ${result.unmatched} unmatched.`);
+        refresh(n => n + 1);
+      } else {
+        setMsg("Failed: " + (result.error || "unknown error"));
+      }
+    } catch(e) { setMsg("Error: " + e.message); }
+    finally { setSyncing(false); }
+  };
+  return (
+    <Card>
+      <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+        <div style={{ width:40, height:40, borderRadius:10, backgroundColor:"#f0f9ff", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+          <Icon name="sync" size={19} color="#0ea5e9"/>
+        </div>
+        <div style={{ flex:1 }}>
+          <div style={{ fontSize:14, fontWeight:600, color:"#1e293b" }}>Epic Chests — 69R</div>
+          <div style={{ fontSize:12, color:"#64748b", marginTop:2 }}>
+            Last sync: {fmtDate(ctSync.lastSync)}
+          </div>
+          {ctSync.lastSync && (
+            <div style={{ fontSize:11, color:"#94a3b8", marginTop:1 }}>
+              {ctSync.matched ?? 0} matched · {(ctSync.unmatched || []).length} unmatched
+            </div>
+          )}
+        </div>
+        <button onClick={handleSync} disabled={syncing}
+          style={{ padding:"7px 14px", borderRadius:8, border:"none", backgroundColor:syncing?"#94a3b8":"#0ea5e9", color:"#fff", fontSize:12, fontWeight:700, cursor:syncing?"not-allowed":"pointer" }}>
+          {syncing ? "…" : "Sync Now"}
+        </button>
+      </div>
+      {msg && <div style={{ fontSize:12, color:"#475569", marginTop:8, padding:"7px 10px", backgroundColor:"#f8fafc", borderRadius:7, border:"1px solid #e2e8f0" }}>{msg}</div>}
+      <div style={{ fontSize:11, color:"#94a3b8", marginTop:10, borderTop:"1px solid #f1f5f9", paddingTop:8 }}>
+        Auto-syncs every Sunday at 10pm via the Apps Script time trigger.
+        To set credentials: Apps Script → Project Settings → Script Properties
+        → add <strong>CT_EMAIL</strong> and <strong>CT_PASSWORD</strong>.
+        To activate the trigger: open Apps Script and run <strong>setupEpicChestsTrigger()</strong>.
+      </div>
+    </Card>
+  );
+};
+
 // ─── ADMIN SCREEN ─────────────────────────────────────────────────────────────
 const AdminScreen = () => {
   const [view,         setView]         = useState("home");
@@ -3880,6 +4143,13 @@ const AdminScreen = () => {
             </div>
           </Card>
         </div>
+      </div>
+      )}
+
+      {isAdmin && (
+      <div style={{ marginBottom:20 }}>
+        <SecHeader title="ChestTracker Sync"/>
+        <AdminCtSyncCard/>
       </div>
       )}
 

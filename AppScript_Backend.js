@@ -24,6 +24,8 @@
 //   A19 → { scores: { 69D_omens } }
 //   A20 → { scores: { 69D_olympus } }
 //   A21 → { pins: { super, 69R, 69S, 69D, user } }
+//   A22 → { scores: { 69R_epic_chests } }
+//   A24 → { ctSync: { 69R: { lastSync, matched, unmatched } }, ctAliases: { 69R: { "CT Name": "playerId" } } }
 //
 // Each cell stays well under Google's 50,000 char limit.
 // Entries are pruned per-event — limits are set below based on 130-player clan sizes.
@@ -41,6 +43,7 @@ const MAX_HISTORY_BY_EVENT = {
   "ragnarok":      12,
   "omens":          5,
   "olympus":        5,
+  "epic_chests":    3,   // auto-synced from ChestTracker; keep last 3 weekly syncs
 };
 
 // Fixed mapping: score key → row number in column A
@@ -63,12 +66,14 @@ const SCORE_ROW_MAP = {
   // "69D_armageddon":     18,  // retired — data preserved in sheet row 18, not read or written
   "69D_omens":          19,
   "69D_olympus":        20,
+  "69R_epic_chests":    22,  // auto-synced from ChestTracker API (69R only)
 };
 const SCORE_KEYS = Object.keys(SCORE_ROW_MAP);
 
 const EMPTY_DATA = {
   players: [], scores: {}, levelRequests: [], rotationLog: [],
   fragmentDistributions: [], lastBackup: null, pins: null,
+  ctSync: {}, ctAliases: {},
 };
 
 // ── Prune a single event's entries to the per-event limit ────────────────────
@@ -99,7 +104,12 @@ function pruneEventDates(eventData, eventId) {
 
 // ── Read all data ─────────────────────────────────────────────────────────────
 function doGet(e) {
-  try { return jsonResponse(readData()); }
+  try {
+    if (e && e.parameter && e.parameter.action === "syncEpicChests") {
+      return jsonResponse(syncEpicChests());
+    }
+    return jsonResponse(readData());
+  }
   catch (err) { return jsonResponse({ error: err.message }); }
 }
 
@@ -107,6 +117,14 @@ function doGet(e) {
 function doPost(e) {
   try {
     const incoming = JSON.parse(e.postData.contents);
+    if (incoming.action === "syncEpicChests") {
+      return jsonResponse(syncEpicChests());
+    }
+    // Safety: if the payload has an unrecognised 'action' field and no data fields,
+    // reject it rather than passing it to writeData (which would wipe the sheet).
+    if (incoming.action) {
+      return jsonResponse({ error: "Unknown action: " + incoming.action });
+    }
     writeData(incoming);
     return jsonResponse({ ok: true });
   } catch (err) { return jsonResponse({ error: err.message }); }
@@ -124,6 +142,7 @@ function getSheet() {
       var row = SCORE_ROW_MAP[key];
       sheet.getRange("A" + row).setValue(JSON.stringify({ scores: {} }));
     });
+    sheet.getRange("A24").setValue(JSON.stringify({ ctSync: {}, ctAliases: {} }));
   }
   return sheet;
 }
@@ -171,6 +190,8 @@ function readData() {
 
   var rawA21 = sheet.getRange("A21").getValue();
   var dataA21 = parse(rawA21);
+  var rawA24 = sheet.getRange("A24").getValue();
+  var dataA24 = parse(rawA24);
 
   return {
     players:               players,
@@ -180,11 +201,19 @@ function readData() {
     rotationLog:           dataA2.rotationLog            || [],
     fragmentDistributions: dataA2.fragmentDistributions  || [],
     pins:                  dataA21.pins                  || null,
+    ctSync:                dataA24.ctSync                || {},
+    ctAliases:             dataA24.ctAliases             || {},
   };
 }
 
 // ── Write ─────────────────────────────────────────────────────────────────────
 function writeData(data) {
+  // Safety guard: if the object looks like an action request (has .action but no
+  // recognised data fields), refuse to write rather than silently wipe the sheet.
+  if (!data || (data.action && !data.players && !data.scores && !data.levelRequests && !data.pins && !data.ctSync)) {
+    throw new Error("writeData: invalid payload — missing required data fields. Keys: " + JSON.stringify(Object.keys(data || {})));
+  }
+
   var sheet = getSheet();
 
   // ── PIN-only save: just update A21, leave everything else untouched ──────────
@@ -221,6 +250,14 @@ function writeData(data) {
   if (data.pins) {
     sheet.getRange("A21").setValue(JSON.stringify({ pins: data.pins }));
   }
+
+  // Write ChestTracker sync metadata to A24
+  var existingA24Raw = sheet.getRange("A24").getValue();
+  var existingA24 = (function(raw) { try { return raw ? JSON.parse(raw) : {}; } catch(_) { return {}; } })(existingA24Raw);
+  sheet.getRange("A24").setValue(JSON.stringify({
+    ctSync:    data.ctSync    !== undefined ? data.ctSync    : (existingA24.ctSync    || {}),
+    ctAliases: data.ctAliases !== undefined ? data.ctAliases : (existingA24.ctAliases || {}),
+  }));
 
   // Write each score key to its own cell, pruning old entries
   SCORE_KEYS.forEach(function(key) {
@@ -325,4 +362,177 @@ function jsonResponse(obj) {
   var output = ContentService.createTextOutput(JSON.stringify(obj));
   output.setMimeType(ContentService.MimeType.JSON);
   return output;
+}
+
+// ─── CHESTTRACKER API SYNC ────────────────────────────────────────────────────
+// To configure: go to Apps Script → Project Settings → Script Properties and add:
+//   CT_EMAIL    → your ChestTracker login email
+//   CT_PASSWORD → your ChestTracker login password
+//
+// To set up the Sunday 10pm trigger: run setupEpicChestsTrigger() once from
+// the Apps Script editor (select it from the function dropdown and click Run).
+// ─────────────────────────────────────────────────────────────────────────────
+
+var CT_API_BASE = "https://api.chesttracker.com/v1";
+
+function getCTToken() {
+  var props = PropertiesService.getScriptProperties();
+  var email    = props.getProperty("CT_EMAIL");
+  var password = props.getProperty("CT_PASSWORD");
+  if (!email || !password) {
+    throw new Error("ChestTracker credentials not configured. Add CT_EMAIL and CT_PASSWORD in Script Properties.");
+  }
+
+  var resp = UrlFetchApp.fetch(CT_API_BASE + "/authenticate", {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify({ email: email, password: password }),
+    muteHttpExceptions: true,
+  });
+
+  if (resp.getResponseCode() !== 200) {
+    throw new Error("ChestTracker auth failed (" + resp.getResponseCode() + "): " + resp.getContentText());
+  }
+
+  var result = JSON.parse(resp.getContentText());
+  var token = result.authToken || result.token || result.accessToken || result.access_token || result.jwt;
+  if (!token) {
+    throw new Error("No token in ChestTracker auth response. Keys: " + JSON.stringify(Object.keys(result)));
+  }
+  return token;
+}
+
+// Main sync function — called by hourly time trigger or manually.
+// Queries ChestTracker from the start of the current week (Sunday midnight UTC)
+// to now, so each run updates the same weekly entry rather than creating a new one.
+// On the first run of a new week the old entry is archived and a fresh one starts.
+function syncEpicChests() {
+  try {
+    var token = getCTToken();
+
+    var now = new Date();
+
+    // Week boundary: Sunday 18:00 UTC → following Sunday 17:59 UTC
+    // If it's Sunday but before 18:00, we're still in last week.
+    var dayOfWeek = now.getUTCDay(); // 0 = Sunday
+    var daysBack  = dayOfWeek === 0 && now.getUTCHours() < 18 ? 7 : dayOfWeek;
+    var startOfWeek = new Date(now);
+    startOfWeek.setUTCDate(now.getUTCDate() - daysBack);
+    startOfWeek.setUTCHours(18, 0, 0, 0);
+    var weekStart = startOfWeek.toISOString().slice(0, 10); // "2026-08-23" (the Sunday)
+
+    var url = CT_API_BASE + "/chests/breakdown?levels=1"
+            + "&start=" + encodeURIComponent(startOfWeek.toISOString())
+            + "&end="   + encodeURIComponent(now.toISOString());
+
+    var resp = UrlFetchApp.fetch(url, {
+      headers: { "Authorization": "Bearer " + token },
+      muteHttpExceptions: true,
+    });
+
+    if (resp.getResponseCode() !== 200) {
+      throw new Error("ChestTracker breakdown failed (" + resp.getResponseCode() + ")");
+    }
+
+    // Response is [ [memberArray], schemaMeta ] or just [memberArray]
+    var parsed  = JSON.parse(resp.getContentText());
+    var members = Array.isArray(parsed[0]) ? parsed[0] : parsed;
+
+    // Load current app data (includes ctAliases for name mapping)
+    var appData  = readData();
+    var players  = (appData.players || []).filter(function(p) { return p.clan === "69R" && p.active; });
+    var aliases  = (appData.ctAliases || {})["69R"] || {};  // { "CT Name": "playerId" }
+
+    // Build a lookup: normalised name → playerId, incorporating saved aliases
+    var nameLookup = {};
+    players.forEach(function(p) {
+      nameLookup[p.name.toLowerCase().trim()] = p.id;
+    });
+
+    var matched   = {};  // playerId → epics count
+    var unmatched = [];  // { name, epics }
+
+    members.forEach(function(member) {
+      var ctName = (member.name || "").trim();
+      if (!ctName) return;
+
+      // Use only the "epic squad" chest type
+      var epicSquad = member["epic squad"];
+      var epics = (epicSquad && typeof epicSquad.chests === "number") ? epicSquad.chests : 0;
+
+      // Match: saved alias → name lookup → unmatched
+      var playerId = aliases[ctName] || nameLookup[ctName.toLowerCase()];
+      if (playerId) {
+        matched[playerId] = epics;
+      } else {
+        unmatched.push({ name: ctName, epics: epics });
+      }
+    });
+
+    // Build score entry — date is set to week start so player profiles display
+    // the week's Sunday date rather than the exact sync timestamp.
+    var scores = {};
+    Object.keys(matched).forEach(function(pid) {
+      scores[pid] = { score: matched[pid] };
+    });
+
+    var entry = {
+      date:      weekStart + "T00:00:00.000Z",  // week start date for display
+      weekStart: weekStart,
+      syncedAt:  now.toISOString(),
+      scores:    scores,
+    };
+
+    // Update or create this week's entry
+    if (!appData.scores) appData.scores = {};
+    var key = "69R_epic_chests";
+    if (!appData.scores[key]) appData.scores[key] = [];
+
+    var entries = appData.scores[key];
+    if (entries.length > 0 && entries[0].weekStart === weekStart) {
+      // Same week — overwrite with refreshed scores
+      entries[0] = entry;
+    } else {
+      // New week — archive the old entry and start a fresh one
+      entries.unshift(entry);
+      if (entries.length > 3) entries = entries.slice(0, 3);
+    }
+    appData.scores[key] = entries;
+
+    // Update ctSync metadata
+    if (!appData.ctSync) appData.ctSync = {};
+    appData.ctSync["69R"] = {
+      lastSync:  now.toISOString(),
+      matched:   Object.keys(matched).length,
+      unmatched: unmatched,
+    };
+
+    writeData(appData);
+    Logger.log("syncEpicChests: week=" + weekStart + " matched=" + Object.keys(matched).length + " unmatched=" + unmatched.length);
+    return { success: true, matched: Object.keys(matched).length, unmatched: unmatched.length };
+
+  } catch (err) {
+    Logger.log("syncEpicChests ERROR: " + err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+// Run this ONCE from the Apps Script editor to register the hourly trigger.
+// If you need to change the frequency, run it again — it deletes the old trigger first.
+// To use every 30 minutes instead, change everyHours(1) to everyMinutes(30).
+function setupEpicChestsTrigger() {
+  // Remove any existing epic chest triggers
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    if (t.getHandlerFunction() === "syncEpicChests") {
+      ScriptApp.deleteTrigger(t);
+    }
+  });
+
+  // Create hourly trigger
+  ScriptApp.newTrigger("syncEpicChests")
+    .timeBased()
+    .everyHours(1)
+    .create();
+
+  Logger.log("Epic Chests trigger set: every hour.");
 }
