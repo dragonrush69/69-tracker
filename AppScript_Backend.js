@@ -169,23 +169,30 @@ function doGet(e) {
       return jsonResponse({ ok: true });
     }
 
-    // Add a CT name to the ignore list for a given clan so it stops appearing as unmatched.
+    // Add or remove a CT name from the ignore list for a given clan.
+    // Pass remove=1 to un-ignore a name.
     if (action === "saveIgnored") {
       var clan   = e.parameter.clan;
       var ctName = e.parameter.ctName;
+      var remove = e.parameter.remove === "1";
       if (!clan || !ctName) return jsonResponse({ error: "Missing clan or ctName" });
       var sheet  = getSheet();
       var raw24  = sheet.getRange("A24").getValue();
       var a24    = raw24 ? JSON.parse(raw24) : {};
       if (!a24.ctIgnored)       a24.ctIgnored = {};
       if (!a24.ctIgnored[clan]) a24.ctIgnored[clan] = [];
-      if (a24.ctIgnored[clan].indexOf(ctName) === -1) a24.ctIgnored[clan].push(ctName);
-      // Remove any alias for this name
-      if (a24.ctAliases && a24.ctAliases[clan]) {
-        delete a24.ctAliases[clan][ctName];
+      if (remove) {
+        a24.ctIgnored[clan] = a24.ctIgnored[clan].filter(function(n) { return n !== ctName; });
+        Logger.log("saveIgnored: un-ignored " + clan + " [" + ctName + "]");
+      } else {
+        if (a24.ctIgnored[clan].indexOf(ctName) === -1) a24.ctIgnored[clan].push(ctName);
+        // Remove any alias for this name when ignoring
+        if (a24.ctAliases && a24.ctAliases[clan]) {
+          delete a24.ctAliases[clan][ctName];
+        }
+        Logger.log("saveIgnored: ignored " + clan + " [" + ctName + "]");
       }
       sheet.getRange("A24").setValue(JSON.stringify(a24));
-      Logger.log("saveIgnored: " + clan + " [" + ctName + "]");
       return jsonResponse({ ok: true });
     }
 
@@ -533,9 +540,12 @@ function syncEpicChests() {
     if (!appData.scores) appData.scores = {};
     if (!appData.ctSync) appData.ctSync = {};
 
-    // Clans to sync — 69R and 69S share the same CT account
+    // Clans to sync — 69R and 69S share the same CT account.
+    // Process in order: a CT member matched to an earlier clan is excluded from later clans,
+    // since a player cannot be active in two clans at the same time.
     var clansToSync = ["69R", "69S"];
     var results = {};
+    var globallyMatchedCtNames = {};  // ctName.toLowerCase() → true, across all clans
 
     clansToSync.forEach(function(clan) {
       var players  = (appData.players || []).filter(function(p) { return p.clan === clan && p.active; });
@@ -558,6 +568,9 @@ function syncEpicChests() {
         // Skip names explicitly ignored for this clan
         if (ignored.indexOf(ctName) !== -1) return;
 
+        // Skip CT members already claimed by a previously-processed clan
+        if (globallyMatchedCtNames[ctName.toLowerCase()]) return;
+
         // Use only the "epic squad" chest type
         var epicSquad = member["epic squad"];
         var epics = (epicSquad && typeof epicSquad.chests === "number") ? epicSquad.chests : 0;
@@ -566,6 +579,7 @@ function syncEpicChests() {
         var playerId = aliases[ctName] || nameLookup[ctName.toLowerCase()];
         if (playerId) {
           matched[playerId] = epics;
+          globallyMatchedCtNames[ctName.toLowerCase()] = true;
         } else {
           unmatched.push({ name: ctName, epics: epics });
         }

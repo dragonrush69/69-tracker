@@ -4318,10 +4318,13 @@ const ChangePinView = ({ onBack }) => {
 
 // ─── ADMIN CT SYNC CARD ───────────────────────────────────────────────────────
 const AdminCtSyncCard = () => {
-  const [syncing,  setSyncing]  = useState(false);
-  const [msg,      setMsg]      = useState("");
+  const [syncing,   setSyncing]   = useState(false);
+  const [msg,       setMsg]       = useState("");
+  const [unignoring, setUnignoring] = useState(null); // "clan:ctName" being removed
   const [, refresh] = useState(0);
-  const allCtSync = storage.getCtSync();
+  const allCtSync   = storage.getCtSync();
+  const allIgnored  = storage.getCtIgnored();
+
   const fmtDate = ts => {
     if (!ts) return "Never";
     const d = new Date(ts);
@@ -4344,6 +4347,30 @@ const AdminCtSyncCard = () => {
     } catch(e) { setMsg("Error: " + e.message); }
     finally { setSyncing(false); }
   };
+
+  const handleUnignore = async (clan, ctName) => {
+    const key = clan + ":" + ctName;
+    setUnignoring(key);
+    try {
+      if (!window._appData) window._appData = {};
+      if (!window._appData.ctIgnored) window._appData.ctIgnored = {};
+      window._appData.ctIgnored[clan] = (window._appData.ctIgnored[clan] || []).filter(n => n !== ctName);
+      if (sheetsEnabled()) {
+        const url = SHEETS_URL
+          + "?action=saveIgnored&remove=1"
+          + "&clan="   + encodeURIComponent(clan)
+          + "&ctName=" + encodeURIComponent(ctName)
+          + "&t="      + Date.now();
+        const resp = await fetch(url);
+        const data = await resp.json();
+        if (!data.ok) throw new Error(data.error || "Server error");
+      }
+      setMsg(`"${ctName}" un-ignored — run Sync Now to see it in the unmatched list.`);
+      refresh(n => n + 1);
+    } catch(e) { setMsg("Failed: " + e.message); }
+    finally { setUnignoring(null); }
+  };
+
   return (
     <Card>
       <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:10 }}>
@@ -4360,18 +4387,38 @@ const AdminCtSyncCard = () => {
         </button>
       </div>
       {["69R","69S"].map(clan => {
-        const cs = allCtSync[clan] || {};
+        const cs       = allCtSync[clan] || {};
+        const ignored  = allIgnored[clan] || [];
         return (
-          <div key={clan} style={{ display:"flex", alignItems:"center", gap:8, paddingTop:6, borderTop:"1px solid #f1f5f9" }}>
-            <span style={{ fontSize:11, fontWeight:700, color:"#64748b", width:28 }}>{clan}</span>
-            <div style={{ flex:1 }}>
-              <div style={{ fontSize:12, color:"#64748b" }}>Last sync: {fmtDate(cs.lastSync)}</div>
-              {cs.lastSync && (
-                <div style={{ fontSize:11, color:"#94a3b8" }}>
-                  {cs.matched ?? 0} matched · {(cs.unmatched || []).length} unmatched
-                </div>
-              )}
+          <div key={clan} style={{ paddingTop:8, borderTop:"1px solid #f1f5f9" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+              <span style={{ fontSize:11, fontWeight:700, color:"#64748b", width:28 }}>{clan}</span>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:12, color:"#64748b" }}>Last sync: {fmtDate(cs.lastSync)}</div>
+                {cs.lastSync && (
+                  <div style={{ fontSize:11, color:"#94a3b8" }}>
+                    {cs.matched ?? 0} matched · {(cs.unmatched || []).length} unmatched
+                  </div>
+                )}
+              </div>
             </div>
+            {ignored.length > 0 && (
+              <div style={{ marginTop:6, marginLeft:36 }}>
+                <div style={{ fontSize:10, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Ignored CT names</div>
+                <div style={{ display:"flex", flexWrap:"wrap", gap:5 }}>
+                  {ignored.map(ctName => (
+                    <div key={ctName} style={{ display:"flex", alignItems:"center", gap:4, backgroundColor:"#f8fafc", border:"1px solid #e2e8f0", borderRadius:6, padding:"3px 8px" }}>
+                      <span style={{ fontSize:11, color:"#475569" }}>{ctName}</span>
+                      <button
+                        onClick={() => handleUnignore(clan, ctName)}
+                        disabled={unignoring === clan + ":" + ctName}
+                        style={{ border:"none", background:"none", color:"#dc2626", fontSize:12, cursor:"pointer", padding:"0 2px", lineHeight:1, fontWeight:700 }}
+                        title="Un-ignore">✕</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         );
       })}
