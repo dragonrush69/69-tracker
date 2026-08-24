@@ -169,6 +169,22 @@ function doGet(e) {
       return jsonResponse({ ok: true });
     }
 
+    // Remove a saved CT alias for a clan (so it goes back to unmatched on next sync).
+    if (action === "removeAlias") {
+      var clan   = e.parameter.clan;
+      var ctName = e.parameter.ctName;
+      if (!clan || !ctName) return jsonResponse({ error: "Missing clan or ctName" });
+      var sheet  = getSheet();
+      var raw24  = sheet.getRange("A24").getValue();
+      var a24    = raw24 ? JSON.parse(raw24) : {};
+      if (a24.ctAliases && a24.ctAliases[clan]) {
+        delete a24.ctAliases[clan][ctName];
+      }
+      sheet.getRange("A24").setValue(JSON.stringify(a24));
+      Logger.log("removeAlias: " + clan + " [" + ctName + "]");
+      return jsonResponse({ ok: true });
+    }
+
     // Add or remove a CT name from the ignore list for a given clan.
     // Pass remove=1 to un-ignore a name.
     if (action === "saveIgnored") {

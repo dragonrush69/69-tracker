@@ -1785,7 +1785,10 @@ const EpicChestsView = ({ clan, event, onBack }) => {
     try {
       const result = await syncFromCT();
       if (result.success) {
-        setSyncMsg(`Synced! ${result.matched} matched · ${result.unmatched} unmatched.`);
+        const cs = result[clan];
+        setSyncMsg(cs
+          ? `Synced! ${cs.matched} matched · ${cs.unmatched} unmatched.`
+          : "Synced!");
         forceUpdate(n => n + 1);
       } else {
         setSyncMsg("Sync failed: " + (result.error || "Unknown error"));
@@ -4318,12 +4321,15 @@ const ChangePinView = ({ onBack }) => {
 
 // ─── ADMIN CT SYNC CARD ───────────────────────────────────────────────────────
 const AdminCtSyncCard = () => {
-  const [syncing,   setSyncing]   = useState(false);
-  const [msg,       setMsg]       = useState("");
-  const [unignoring, setUnignoring] = useState(null); // "clan:ctName" being removed
+  const [syncing,    setSyncing]    = useState(false);
+  const [msg,        setMsg]        = useState("");
+  const [unignoring, setUnignoring] = useState(null);
+  const [removing,   setRemoving]   = useState(null);
   const [, refresh] = useState(0);
   const allCtSync   = storage.getCtSync();
   const allIgnored  = storage.getCtIgnored();
+  const allAliases  = storage.getCtAliases();
+  const allPlayers  = storage.getPlayers();
 
   const fmtDate = ts => {
     if (!ts) return "Never";
@@ -4346,6 +4352,30 @@ const AdminCtSyncCard = () => {
       }
     } catch(e) { setMsg("Error: " + e.message); }
     finally { setSyncing(false); }
+  };
+
+  const handleRemoveAlias = async (clan, ctName) => {
+    const key = clan + ":" + ctName;
+    setRemoving(key);
+    try {
+      if (!window._appData) window._appData = {};
+      if (!window._appData.ctAliases) window._appData.ctAliases = {};
+      if (window._appData.ctAliases[clan]) delete window._appData.ctAliases[clan][ctName];
+      if (sheetsEnabled()) {
+        // Remove alias by saving it as empty — backend will delete it
+        const url = SHEETS_URL
+          + "?action=removeAlias"
+          + "&clan="   + encodeURIComponent(clan)
+          + "&ctName=" + encodeURIComponent(ctName)
+          + "&t="      + Date.now();
+        const resp = await fetch(url);
+        const data = await resp.json();
+        if (!data.ok) throw new Error(data.error || "Server error");
+      }
+      setMsg(`Alias for "${ctName}" removed — it will appear as unmatched on next sync.`);
+      refresh(n => n + 1);
+    } catch(e) { setMsg("Failed: " + e.message); }
+    finally { setRemoving(null); }
   };
 
   const handleUnignore = async (clan, ctName) => {
@@ -4389,6 +4419,8 @@ const AdminCtSyncCard = () => {
       {["69R","69S"].map(clan => {
         const cs       = allCtSync[clan] || {};
         const ignored  = allIgnored[clan] || [];
+        const aliases  = allAliases[clan] || {};
+        const aliasEntries = Object.entries(aliases);
         return (
           <div key={clan} style={{ paddingTop:8, borderTop:"1px solid #f1f5f9" }}>
             <div style={{ display:"flex", alignItems:"center", gap:8 }}>
@@ -4402,6 +4434,28 @@ const AdminCtSyncCard = () => {
                 )}
               </div>
             </div>
+            {aliasEntries.length > 0 && (
+              <div style={{ marginTop:6, marginLeft:36 }}>
+                <div style={{ fontSize:10, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>CT name aliases</div>
+                <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+                  {aliasEntries.map(([ctName, pid]) => {
+                    const player = allPlayers.find(p => p.id === pid);
+                    return (
+                      <div key={ctName} style={{ display:"flex", alignItems:"center", gap:6, backgroundColor:"#f0fdf4", border:"1px solid #bbf7d0", borderRadius:6, padding:"3px 8px" }}>
+                        <span style={{ fontSize:11, color:"#475569", flex:1 }}>
+                          <strong>{ctName}</strong> → {player ? player.name : <span style={{ color:"#dc2626" }}>unknown player (bad link)</span>}
+                        </span>
+                        <button
+                          onClick={() => handleRemoveAlias(clan, ctName)}
+                          disabled={removing === clan + ":" + ctName}
+                          style={{ border:"none", background:"none", color:"#dc2626", fontSize:12, cursor:"pointer", padding:"0 2px", lineHeight:1, fontWeight:700 }}
+                          title="Remove alias">✕</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             {ignored.length > 0 && (
               <div style={{ marginTop:6, marginLeft:36 }}>
                 <div style={{ fontSize:10, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:4 }}>Ignored CT names</div>
