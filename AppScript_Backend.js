@@ -25,7 +25,8 @@
 //   A20 → { scores: { 69D_olympus } }
 //   A21 → { pins: { super, 69R, 69S, 69D, user } }
 //   A22 → { scores: { 69R_epic_chests } }
-//   A24 → { ctSync: { 69R: { lastSync, matched, unmatched } }, ctAliases: { 69R: { "CT Name": "playerId" } } }
+//   A24 → { ctSync: { 69R: {...}, 69S: {...} }, ctAliases: { 69R: {...}, 69S: {...} } }
+//   A26 → { scores: { 69S_epic_chests } }
 //   A25 → { "69R": { "epic_chests": { "T9": 500, "G9": 400 }, ... }, ... }  ← performance norms
 //
 // Each cell stays well under Google's 50,000 char limit.
@@ -67,7 +68,8 @@ const SCORE_ROW_MAP = {
   // "69D_armageddon":     18,  // retired — data preserved in sheet row 18, not read or written
   "69D_omens":          19,
   "69D_olympus":        20,
-  "69R_epic_chests":    22,  // auto-synced from ChestTracker API (69R only)
+  "69R_epic_chests":    22,  // auto-synced from ChestTracker API
+  "69S_epic_chests":    26,  // auto-synced from ChestTracker API (same account)
 };
 const SCORE_KEYS = Object.keys(SCORE_ROW_MAP);
 
@@ -85,7 +87,7 @@ const DEFAULT_PINS = {
 const EMPTY_DATA = {
   players: [], scores: {}, levelRequests: [], rotationLog: [],
   fragmentDistributions: [], lastBackup: null, pins: DEFAULT_PINS,
-  ctSync: {}, ctAliases: {},
+  ctSync: {}, ctAliases: {}, ctIgnored: {},
 };
 
 // ── Prune a single event's entries to the per-event limit ────────────────────
@@ -145,6 +147,48 @@ function doGet(e) {
       return jsonResponse({ ok: true });
     }
 
+    // Save a CT name → player ID alias for a given clan.
+    // Also removes the name from ctIgnored if it was there.
+    if (action === "saveAlias") {
+      var clan    = e.parameter.clan;
+      var ctName  = e.parameter.ctName;
+      var pid     = e.parameter.playerId;
+      if (!clan || !ctName || !pid) return jsonResponse({ error: "Missing clan, ctName, or playerId" });
+      var sheet   = getSheet();
+      var raw24   = sheet.getRange("A24").getValue();
+      var a24     = raw24 ? JSON.parse(raw24) : {};
+      if (!a24.ctAliases)      a24.ctAliases = {};
+      if (!a24.ctAliases[clan]) a24.ctAliases[clan] = {};
+      a24.ctAliases[clan][ctName] = pid;
+      // Remove from ignored if present
+      if (a24.ctIgnored && a24.ctIgnored[clan]) {
+        a24.ctIgnored[clan] = (a24.ctIgnored[clan] || []).filter(function(n) { return n !== ctName; });
+      }
+      sheet.getRange("A24").setValue(JSON.stringify(a24));
+      Logger.log("saveAlias: " + clan + " [" + ctName + "] → " + pid);
+      return jsonResponse({ ok: true });
+    }
+
+    // Add a CT name to the ignore list for a given clan so it stops appearing as unmatched.
+    if (action === "saveIgnored") {
+      var clan   = e.parameter.clan;
+      var ctName = e.parameter.ctName;
+      if (!clan || !ctName) return jsonResponse({ error: "Missing clan or ctName" });
+      var sheet  = getSheet();
+      var raw24  = sheet.getRange("A24").getValue();
+      var a24    = raw24 ? JSON.parse(raw24) : {};
+      if (!a24.ctIgnored)       a24.ctIgnored = {};
+      if (!a24.ctIgnored[clan]) a24.ctIgnored[clan] = [];
+      if (a24.ctIgnored[clan].indexOf(ctName) === -1) a24.ctIgnored[clan].push(ctName);
+      // Remove any alias for this name
+      if (a24.ctAliases && a24.ctAliases[clan]) {
+        delete a24.ctAliases[clan][ctName];
+      }
+      sheet.getRange("A24").setValue(JSON.stringify(a24));
+      Logger.log("saveIgnored: " + clan + " [" + ctName + "]");
+      return jsonResponse({ ok: true });
+    }
+
     return jsonResponse(readData());
   }
   catch (err) { return jsonResponse({ error: err.message }); }
@@ -180,8 +224,9 @@ function getSheet() {
       sheet.getRange("A" + row).setValue(JSON.stringify({ scores: {} }));
     });
     sheet.getRange("A21").setValue(JSON.stringify({ pins: DEFAULT_PINS }));
-    sheet.getRange("A24").setValue(JSON.stringify({ ctSync: {}, ctAliases: {} }));
+    sheet.getRange("A24").setValue(JSON.stringify({ ctSync: {}, ctAliases: {}, ctIgnored: {} }));
     sheet.getRange("A25").setValue(JSON.stringify({}));
+    sheet.getRange("A26").setValue(JSON.stringify({ scores: {} }));
   }
   return sheet;
 }
@@ -244,6 +289,7 @@ function readData() {
     pins:                  dataA21.pins                  || DEFAULT_PINS,
     ctSync:                dataA24.ctSync                || {},
     ctAliases:             dataA24.ctAliases             || {},
+    ctIgnored:             dataA24.ctIgnored             || {},
     norms:                 normsData,
   };
 }
@@ -299,6 +345,7 @@ function writeData(data) {
   sheet.getRange("A24").setValue(JSON.stringify({
     ctSync:    data.ctSync    !== undefined ? data.ctSync    : (existingA24.ctSync    || {}),
     ctAliases: data.ctAliases !== undefined ? data.ctAliases : (existingA24.ctAliases || {}),
+    ctIgnored: data.ctIgnored !== undefined ? data.ctIgnored : (existingA24.ctIgnored || {}),
   }));
 
   // Write each score key to its own cell, pruning old entries
@@ -448,6 +495,7 @@ function getCTToken() {
 // Queries ChestTracker from the start of the current week (Sunday midnight UTC)
 // to now, so each run updates the same weekly entry rather than creating a new one.
 // On the first run of a new week the old entry is archived and a fresh one starts.
+// Syncs both 69R and 69S from the same CT account in a single API call.
 function syncEpicChests() {
   try {
     var token = getCTToken();
@@ -481,77 +529,87 @@ function syncEpicChests() {
     var members = Array.isArray(parsed[0]) ? parsed[0] : parsed;
 
     // Load current app data (includes ctAliases for name mapping)
-    var appData  = readData();
-    var players  = (appData.players || []).filter(function(p) { return p.clan === "69R" && p.active; });
-    var aliases  = (appData.ctAliases || {})["69R"] || {};  // { "CT Name": "playerId" }
-
-    // Build a lookup: normalised name → playerId, incorporating saved aliases
-    var nameLookup = {};
-    players.forEach(function(p) {
-      nameLookup[p.name.toLowerCase().trim()] = p.id;
-    });
-
-    var matched   = {};  // playerId → epics count
-    var unmatched = [];  // { name, epics }
-
-    members.forEach(function(member) {
-      var ctName = (member.name || "").trim();
-      if (!ctName) return;
-
-      // Use only the "epic squad" chest type
-      var epicSquad = member["epic squad"];
-      var epics = (epicSquad && typeof epicSquad.chests === "number") ? epicSquad.chests : 0;
-
-      // Match: saved alias → name lookup → unmatched
-      var playerId = aliases[ctName] || nameLookup[ctName.toLowerCase()];
-      if (playerId) {
-        matched[playerId] = epics;
-      } else {
-        unmatched.push({ name: ctName, epics: epics });
-      }
-    });
-
-    // Build score entry — date is set to week start so player profiles display
-    // the week's Sunday date rather than the exact sync timestamp.
-    var scores = {};
-    Object.keys(matched).forEach(function(pid) {
-      scores[pid] = { score: matched[pid] };
-    });
-
-    var entry = {
-      date:      weekStart + "T00:00:00.000Z",  // week start date for display
-      weekStart: weekStart,
-      syncedAt:  now.toISOString(),
-      scores:    scores,
-    };
-
-    // Update or create this week's entry
+    var appData = readData();
     if (!appData.scores) appData.scores = {};
-    var key = "69R_epic_chests";
-    if (!appData.scores[key]) appData.scores[key] = [];
-
-    var entries = appData.scores[key];
-    if (entries.length > 0 && entries[0].weekStart === weekStart) {
-      // Same week — overwrite with refreshed scores
-      entries[0] = entry;
-    } else {
-      // New week — archive the old entry and start a fresh one
-      entries.unshift(entry);
-      if (entries.length > 3) entries = entries.slice(0, 3);
-    }
-    appData.scores[key] = entries;
-
-    // Update ctSync metadata
     if (!appData.ctSync) appData.ctSync = {};
-    appData.ctSync["69R"] = {
-      lastSync:  now.toISOString(),
-      matched:   Object.keys(matched).length,
-      unmatched: unmatched,
-    };
+
+    // Clans to sync — 69R and 69S share the same CT account
+    var clansToSync = ["69R", "69S"];
+    var results = {};
+
+    clansToSync.forEach(function(clan) {
+      var players  = (appData.players || []).filter(function(p) { return p.clan === clan && p.active; });
+      var aliases  = (appData.ctAliases || {})[clan] || {};   // { "CT Name": "playerId" }
+      var ignored  = (appData.ctIgnored || {})[clan] || [];   // ["CT Name", ...]
+
+      // Build name → playerId lookup
+      var nameLookup = {};
+      players.forEach(function(p) {
+        nameLookup[p.name.toLowerCase().trim()] = p.id;
+      });
+
+      var matched   = {};  // playerId → epics count
+      var unmatched = [];  // { name, epics } — CT names not found in this clan
+
+      members.forEach(function(member) {
+        var ctName = (member.name || "").trim();
+        if (!ctName) return;
+
+        // Skip names explicitly ignored for this clan
+        if (ignored.indexOf(ctName) !== -1) return;
+
+        // Use only the "epic squad" chest type
+        var epicSquad = member["epic squad"];
+        var epics = (epicSquad && typeof epicSquad.chests === "number") ? epicSquad.chests : 0;
+
+        // Match: saved alias → name lookup → unmatched
+        var playerId = aliases[ctName] || nameLookup[ctName.toLowerCase()];
+        if (playerId) {
+          matched[playerId] = epics;
+        } else {
+          unmatched.push({ name: ctName, epics: epics });
+        }
+      });
+
+      // Build score entry — date is week start so player profiles show the Sunday date
+      var scores = {};
+      Object.keys(matched).forEach(function(pid) {
+        scores[pid] = { score: matched[pid] };
+      });
+
+      var entry = {
+        date:      weekStart + "T00:00:00.000Z",
+        weekStart: weekStart,
+        syncedAt:  now.toISOString(),
+        scores:    scores,
+      };
+
+      // Update or create this week's entry
+      var key = clan + "_epic_chests";
+      if (!appData.scores[key]) appData.scores[key] = [];
+
+      var entries = appData.scores[key];
+      if (entries.length > 0 && entries[0].weekStart === weekStart) {
+        entries[0] = entry;  // Same week — overwrite with refreshed scores
+      } else {
+        entries.unshift(entry);  // New week — archive old and start fresh
+        if (entries.length > 3) entries = entries.slice(0, 3);
+      }
+      appData.scores[key] = entries;
+
+      // Update ctSync metadata for this clan
+      appData.ctSync[clan] = {
+        lastSync:  now.toISOString(),
+        matched:   Object.keys(matched).length,
+        unmatched: unmatched,
+      };
+
+      results[clan] = { matched: Object.keys(matched).length, unmatched: unmatched.length };
+      Logger.log("syncEpicChests " + clan + ": week=" + weekStart + " matched=" + Object.keys(matched).length + " unmatched=" + unmatched.length);
+    });
 
     writeData(appData);
-    Logger.log("syncEpicChests: week=" + weekStart + " matched=" + Object.keys(matched).length + " unmatched=" + unmatched.length);
-    return { success: true, matched: Object.keys(matched).length, unmatched: unmatched.length };
+    return { success: true, "69R": results["69R"], "69S": results["69S"] };
 
   } catch (err) {
     Logger.log("syncEpicChests ERROR: " + err.message);
