@@ -2980,20 +2980,29 @@ const LevelRequestsView = ({ onBack }) => {
   const resolved = all.filter(r=>r.status!=="pending");
 
   const approve = (id) => {
-    const reqs = storage.getLevelRequests();
-    const req  = reqs.find(r=>r.id===id);
+    const reqs    = storage.getLevelRequests();
+    const req     = reqs.find(r => r.id === id);
     const isStatType = ["hero","level","might"].includes(req.levelType);
-    storage.savePlayers(storage.getPlayers().map(p => {
+
+    // Update players in memory first — no intermediate save
+    const updatedPlayers = storage.getPlayers().map(p => {
       if (p.id !== req.playerId) return p;
       if (isStatType) return { ...p, [req.levelType]: Number(req.to) };
       return { ...p, levels: { ...p.levels, [req.levelType]: req.to } };
-    }));
-    storage.saveLevelRequests(reqs.map(r=>r.id===id?{...r,status:"approved",resolvedDate:today()}:r));
+    });
+    const updatedReqs = reqs.map(r => r.id === id ? { ...r, status:"approved", resolvedDate:today() } : r);
+
+    // Apply both changes to appData and do ONE atomic save
+    window._appData.players       = updatedPlayers;
+    window._appData.levelRequests = updatedReqs;
+    saveToSheets(window._appData);
     forceUpdate();
   };
 
   const reject = (id) => {
-    storage.saveLevelRequests(storage.getLevelRequests().map(r=>r.id===id?{...r,status:"rejected",resolvedDate:today()}:r));
+    const updatedReqs = storage.getLevelRequests().map(r => r.id === id ? { ...r, status:"rejected", resolvedDate:today() } : r);
+    window._appData.levelRequests = updatedReqs;
+    saveToSheets(window._appData);
     forceUpdate();
   };
 

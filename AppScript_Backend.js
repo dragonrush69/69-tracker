@@ -487,18 +487,24 @@ function jsonResponse(obj) {
 
 var CT_API_BASE = "https://api.chesttracker.com/v1";
 
-function getCTToken() {
-  var props = PropertiesService.getScriptProperties();
+// Authenticate and return a token.
+// Pass memberId to get a clan-scoped token (required for /chests/breakdown).
+// Without memberId, the token is only valid for listing endpoints (/clans, /members).
+function getCTToken(memberId) {
+  var props    = PropertiesService.getScriptProperties();
   var email    = props.getProperty("CT_EMAIL");
   var password = props.getProperty("CT_PASSWORD");
   if (!email || !password) {
     throw new Error("ChestTracker credentials not configured. Add CT_EMAIL and CT_PASSWORD in Script Properties.");
   }
 
+  var body = { email: email, password: password };
+  if (memberId) body.memberId = memberId;
+
   var resp = UrlFetchApp.fetch(CT_API_BASE + "/authenticate", {
     method: "post",
     contentType: "application/json",
-    payload: JSON.stringify({ email: email, password: password }),
+    payload: JSON.stringify(body),
     muteHttpExceptions: true,
   });
 
@@ -521,49 +527,78 @@ function getCTToken() {
 // Syncs both 69R and 69S from the same CT account in a single API call.
 function syncEpicChests() {
   try {
-    var token = getCTToken();
-
     var now = new Date();
 
     // Week boundary: Sunday 18:00 UTC → following Sunday 17:59 UTC
-    // If it's Sunday but before 18:00, we're still in last week.
     var dayOfWeek = now.getUTCDay(); // 0 = Sunday
     var daysBack  = dayOfWeek === 0 && now.getUTCHours() < 18 ? 7 : dayOfWeek;
     var startOfWeek = new Date(now);
     startOfWeek.setUTCDate(now.getUTCDate() - daysBack);
     startOfWeek.setUTCHours(18, 0, 0, 0);
-    var weekStart = startOfWeek.toISOString().slice(0, 10); // "2026-08-23" (the Sunday)
+    var weekStart = startOfWeek.toISOString().slice(0, 10);
 
-    var url = CT_API_BASE + "/chests/breakdown?levels=1"
-            + "&start=" + encodeURIComponent(startOfWeek.toISOString())
-            + "&end="   + encodeURIComponent(now.toISOString());
+    var timeParams = "?levels=1"
+                   + "&start=" + encodeURIComponent(startOfWeek.toISOString())
+                   + "&end="   + encodeURIComponent(now.toISOString());
 
-    var resp = UrlFetchApp.fetch(url, {
-      headers: { "Authorization": "Bearer " + token },
-      muteHttpExceptions: true,
+    // Step 1: Base auth (no memberId) — only valid for listing endpoints.
+    var baseToken   = getCTToken();
+    var baseHeaders = { "Authorization": "Bearer " + baseToken };
+
+    // Step 2: Get clan tag→id map from /clans.
+    var clansRaw  = JSON.parse(UrlFetchApp.fetch(CT_API_BASE + "/clans", { headers: baseHeaders, muteHttpExceptions: true }).getContentText());
+    var clansList = Array.isArray(clansRaw[0]) ? clansRaw[0] : clansRaw;
+    var tagToClanId = {};
+    clansList.forEach(function(c) { if (c.tag && c.id) tagToClanId[c.tag] = c.id; });
+
+    // Step 3: Get the account's per-clan member IDs from /members.
+    // /members returns the CT account's own membership records (one per clan).
+    var membersRaw   = JSON.parse(UrlFetchApp.fetch(CT_API_BASE + "/members", { headers: baseHeaders, muteHttpExceptions: true }).getContentText());
+    var acctMembers  = Array.isArray(membersRaw[0]) ? membersRaw[0] : membersRaw;
+    // Build clanId → memberId (the account's membership ID in that clan)
+    var clanIdToMemberId = {};
+    acctMembers.forEach(function(m) { if (m.clanId && m.id) clanIdToMemberId[m.clanId] = m.id; });
+    // Derive tag → memberId
+    var tagToMemberId = {};
+    Object.keys(tagToClanId).forEach(function(tag) {
+      var clanId = tagToClanId[tag];
+      if (clanIdToMemberId[clanId]) tagToMemberId[tag] = clanIdToMemberId[clanId];
     });
+    Logger.log("syncEpicChests: clans=" + JSON.stringify(tagToClanId) + " memberIds=" + JSON.stringify(tagToMemberId));
 
-    if (resp.getResponseCode() !== 200) {
-      throw new Error("ChestTracker breakdown failed (" + resp.getResponseCode() + ")");
-    }
-
-    // Response is [ [memberArray], schemaMeta ] or just [memberArray]
-    var parsed  = JSON.parse(resp.getContentText());
-    var members = Array.isArray(parsed[0]) ? parsed[0] : parsed;
-
-    // Load current app data (includes ctAliases for name mapping)
+    // Load current app data
     var appData = readData();
     if (!appData.scores) appData.scores = {};
     if (!appData.ctSync) appData.ctSync = {};
 
-    // Clans to sync — 69R and 69S share the same CT account.
-    // Process in order: a CT member matched to an earlier clan is excluded from later clans,
-    // since a player cannot be active in two clans at the same time.
     var clansToSync = ["69R", "69S"];
     var results = {};
-    var globallyMatchedCtNames = {};  // ctName.toLowerCase() → true, across all clans
 
     clansToSync.forEach(function(clan) {
+      var memberId = tagToMemberId[clan];
+      if (!memberId) {
+        Logger.log("syncEpicChests: no CT memberId for " + clan + " — skipping");
+        results[clan] = { matched: 0, unmatched: 0 };
+        return;
+      }
+
+      // Step 4: Per-clan auth — memberId scopes the token to this clan.
+      var clanToken   = getCTToken(memberId);
+      var clanHeaders = { "Authorization": "Bearer " + clanToken };
+
+      // Step 5: Fetch chest breakdown for this clan.
+      var url  = CT_API_BASE + "/chests/breakdown" + timeParams;
+      var resp = UrlFetchApp.fetch(url, { headers: clanHeaders, muteHttpExceptions: true });
+      if (resp.getResponseCode() !== 200) {
+        Logger.log("syncEpicChests: breakdown failed for " + clan + " (" + resp.getResponseCode() + ")");
+        results[clan] = { matched: 0, unmatched: 0 };
+        return;
+      }
+
+      var parsed  = JSON.parse(resp.getContentText());
+      var members = Array.isArray(parsed[0]) ? parsed[0] : parsed;
+      Logger.log("syncEpicChests " + clan + ": CT returned " + members.length + " members");
+
       var players  = (appData.players || []).filter(function(p) { return p.clan === clan && p.active; });
       var aliases  = (appData.ctAliases || {})[clan] || {};   // { "CT Name": "playerId" }
       var ignored  = (appData.ctIgnored || {})[clan] || [];   // ["CT Name", ...]
@@ -580,22 +615,16 @@ function syncEpicChests() {
       members.forEach(function(member) {
         var ctName = (member.name || "").trim();
         if (!ctName) return;
-
-        // Skip names explicitly ignored for this clan
         if (ignored.indexOf(ctName) !== -1) return;
-
-        // Skip CT members already claimed by a previously-processed clan
-        if (globallyMatchedCtNames[ctName.toLowerCase()]) return;
 
         // Use only the "epic squad" chest type
         var epicSquad = member["epic squad"];
         var epics = (epicSquad && typeof epicSquad.chests === "number") ? epicSquad.chests : 0;
 
         // Match: saved alias → name lookup → unmatched
-        var playerId = aliases[ctName] || nameLookup[ctName.toLowerCase()];
+        var playerId = aliases[ctName] || nameLookup[ctName.toLowerCase().trim()];
         if (playerId) {
           matched[playerId] = epics;
-          globallyMatchedCtNames[ctName.toLowerCase()] = true;
         } else {
           unmatched.push({ name: ctName, epics: epics });
         }
@@ -644,6 +673,143 @@ function syncEpicChests() {
   } catch (err) {
     Logger.log("syncEpicChests ERROR: " + err.message);
     return { success: false, error: err.message };
+  }
+}
+
+// ── DIAGNOSTIC — run this ONCE from the Apps Script editor ───────────────────
+// Probes the CT API to find the right endpoint/parameter for selecting a clan.
+function debugCtResponse() {
+  try {
+    var props    = PropertiesService.getScriptProperties();
+    var email    = props.getProperty("CT_EMAIL");
+    var password = props.getProperty("CT_PASSWORD");
+
+    // Step 1: Log full auth response — might contain group/clan IDs
+    Logger.log("=== AUTH RESPONSE ===");
+    var authResp = UrlFetchApp.fetch(CT_API_BASE + "/authenticate", {
+      method: "post",
+      headers: { "Content-Type": "application/json" },
+      payload: JSON.stringify({ email: email, password: password }),
+      muteHttpExceptions: true,
+    });
+    Logger.log("Auth status: " + authResp.getResponseCode());
+    Logger.log("Auth body: " + authResp.getContentText());
+
+    var authData = JSON.parse(authResp.getContentText());
+    var token    = authData.authToken || authData.token || authData.access_token || authData.accessToken || "";
+    if (!token) { Logger.log("No token found — check auth body above"); return; }
+    Logger.log("Token obtained: " + token.slice(0, 30) + "...");
+
+    var headers = { "Authorization": "Bearer " + token };
+
+    // Step 2: Try /groups or /clans or /me to find group IDs
+    Logger.log("=== PROBING ENDPOINTS ===");
+    var endpoints = ["/groups", "/clans", "/me", "/user", "/user/groups", "/account"];
+    endpoints.forEach(function(ep) {
+      try {
+        var r = UrlFetchApp.fetch(CT_API_BASE + ep, { headers: headers, muteHttpExceptions: true });
+        Logger.log(ep + " → " + r.getResponseCode() + ": " + r.getContentText().slice(0, 300));
+      } catch(e) { Logger.log(ep + " → ERROR: " + e.message); }
+    });
+
+    // Step 3: Get clan IDs from /clans
+    Logger.log("=== CLAN IDs ===");
+    var clansRaw  = JSON.parse(UrlFetchApp.fetch(CT_API_BASE + "/clans", { headers: headers, muteHttpExceptions: true }).getContentText());
+    var clansList = Array.isArray(clansRaw[0]) ? clansRaw[0] : clansRaw;
+    var tagToId = {};
+    clansList.forEach(function(c) { if (c.tag && c.id) tagToId[c.tag] = c.id; });
+    Logger.log("Clans: " + JSON.stringify(tagToId));
+    var id69S = tagToId["69S"] || "82ee1599-67c3-41c2-868f-e751541264e1";
+    var id69R = tagToId["69R"] || "97abb703-1122-43b4-a77c-2f5b21464c6d";
+
+    // Step 4: Try breakdown endpoint path variations
+    Logger.log("=== TRYING ENDPOINT PATH VARIATIONS ===");
+    var now   = new Date();
+    var start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    var timeQ = "levels=1&start=" + encodeURIComponent(start.toISOString()) + "&end=" + encodeURIComponent(now.toISOString());
+    var pathTests = [
+      "/clans/" + id69S + "/chests/breakdown?" + timeQ,
+      "/clans/" + id69S + "/breakdown?" + timeQ,
+      "/chests/breakdown?clanId=" + id69S + "&" + timeQ,
+      "/chests/breakdown?groupId=" + id69S + "&" + timeQ,
+      "/chests/breakdown?clan=" + id69S + "&" + timeQ,
+    ];
+    pathTests.forEach(function(path) {
+      try {
+        var r = UrlFetchApp.fetch(CT_API_BASE + path, { headers: headers, muteHttpExceptions: true });
+        var code = r.getResponseCode();
+        if (code === 200) {
+          var parsed = JSON.parse(r.getContentText());
+          var members = Array.isArray(parsed[0]) ? parsed[0] : parsed;
+          Logger.log(path.slice(0,60) + " → " + code + " members: " + members.length + " first: " + (members[0] && members[0].name));
+        } else {
+          Logger.log(path.slice(0,60) + " → " + code);
+        }
+      } catch(e) { Logger.log(path.slice(0,60) + " → ERROR: " + e.message); }
+    });
+
+    // Step 5: Get actual member IDs from /members (CT account memberships, not game players)
+    Logger.log("=== /members — GET ACCOUNT MEMBER IDs ===");
+    var membersResp = UrlFetchApp.fetch(CT_API_BASE + "/members", { headers: headers, muteHttpExceptions: true });
+    var membersRaw  = JSON.parse(membersResp.getContentText());
+    var acctMembers = Array.isArray(membersRaw[0]) ? membersRaw[0] : membersRaw;
+    Logger.log("Account members: " + JSON.stringify(acctMembers.map(function(m) { return { id: m.id, name: m.name, clanId: m.clanId }; })));
+
+    var memberId69R = null, memberId69S = null;
+    acctMembers.forEach(function(m) {
+      if (m.clanId === id69R) memberId69R = m.id;
+      if (m.clanId === id69S) memberId69S = m.id;
+    });
+    Logger.log("69R member ID: " + memberId69R);
+    Logger.log("69S member ID: " + memberId69S);
+
+    // Step 6: Auth with specific MEMBER IDs to get clan-scoped tokens
+    Logger.log("=== AUTH WITH MEMBER IDs ===");
+    function decodeJwtPayload(jwt) {
+      try {
+        var parts = jwt.split(".");
+        var payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+        while (payload.length % 4 !== 0) payload += "=";
+        return Utilities.newBlob(Utilities.base64Decode(payload)).getDataAsString();
+      } catch(e) { return "decode error: " + e.message; }
+    }
+
+    function tryAuth(label, body) {
+      var r = UrlFetchApp.fetch(CT_API_BASE + "/authenticate", {
+        method: "post",
+        headers: { "Content-Type": "application/json" },
+        payload: JSON.stringify(body),
+        muteHttpExceptions: true,
+      });
+      var d = JSON.parse(r.getContentText());
+      var tk = d.authToken || d.token || "";
+      if (!tk) { Logger.log(label + ": no token — " + r.getContentText().slice(0, 100)); return null; }
+      var decoded = JSON.parse(decodeJwtPayload(tk));
+      Logger.log(label + ": authorizedMember=" + JSON.stringify(decoded.authorizedMember) + " favoriteId=" + decoded.favoriteId);
+      // Test breakdown with this token
+      var br = UrlFetchApp.fetch(CT_API_BASE + "/chests/breakdown?" + timeQ, {
+        headers: { "Authorization": "Bearer " + tk },
+        muteHttpExceptions: true,
+      });
+      if (br.getResponseCode() === 200) {
+        var bp = JSON.parse(br.getContentText());
+        var bm = Array.isArray(bp[0]) ? bp[0] : bp;
+        Logger.log(label + " breakdown → " + br.getResponseCode() + " members=" + (Array.isArray(bm) ? bm.length : "?") + " first=" + (bm[0] && bm[0].name));
+      } else {
+        Logger.log(label + " breakdown → " + br.getResponseCode() + ": " + br.getContentText().slice(0,100));
+      }
+      return tk;
+    }
+
+    // Base auth (no extras) — confirm current state
+    tryAuth("base auth", { email: email, password: password });
+    // Auth with 69R member ID
+    if (memberId69R) tryAuth("memberId=69R(" + memberId69R.slice(0,8) + "...)", { email: email, password: password, memberId: memberId69R });
+    // Auth with 69S member ID
+    if (memberId69S) tryAuth("memberId=69S(" + memberId69S.slice(0,8) + "...)", { email: email, password: password, memberId: memberId69S });
+
+  } catch(err) {
+    Logger.log("debugCtResponse ERROR: " + err.message);
   }
 }
 
