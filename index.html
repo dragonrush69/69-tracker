@@ -84,6 +84,26 @@ async function savePinToStorage(key, pin) {
   }
 }
 
+async function saveNormsToStorage(norms) {
+  if (!window._appData) window._appData = {};
+  window._appData.norms = norms;
+  if (sheetsEnabled()) {
+    try {
+      const url = SHEETS_URL
+        + "?action=saveNorms"
+        + "&norms=" + encodeURIComponent(JSON.stringify(norms))
+        + "&t=" + Date.now();
+      const resp = await fetch(url);
+      const data = await resp.json();
+      if (!data.ok) throw new Error(data.error || "Server returned error");
+      console.log("Norms saved to Sheets ✓");
+    } catch (err) {
+      console.warn("Norms save to Sheets failed:", err);
+      alert("Warning: Norms saved in memory but could not reach the server.\nOther devices won't see the change until you try again.");
+    }
+  }
+}
+
 function resolvePin(pin) {
   if (!pin) return null;
   const p = getActivePins();
@@ -379,6 +399,7 @@ const storage = {
     _ensure(); window._appData.lastBackup = v;
     saveToSheets(window._appData);
   },
+  getNorms: () => window._appData?.norms || {},
 };
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
@@ -466,6 +487,30 @@ const TrendBadge = ({ trend, size="sm" }) => {
   );
 };
 
+const Sparkline = ({ data, color="#3b82f6", height=50 }) => {
+  if (!data || data.length < 2) return (
+    <div style={{ height, backgroundColor:"#f8fafc", borderRadius:6, display:"flex", alignItems:"center", justifyContent:"center" }}>
+      <span style={{ fontSize:11, color:"#94a3b8" }}>Not enough data</span>
+    </div>
+  );
+  const vals = data.map(d => d.total);
+  const min  = Math.min(...vals);
+  const max  = Math.max(...vals);
+  const range = max - min || 1;
+  const W = 200, H = height;
+  const ptArr = vals.map((v, i) => [
+    (i / (vals.length - 1)) * W,
+    H - ((v - min) / range) * (H - 10) - 5
+  ]);
+  const pts = ptArr.map(([x, y]) => `${x},${y}`).join(" ");
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width:"100%", height, display:"block" }} preserveAspectRatio="none">
+      <polyline points={pts} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
+      {ptArr.map(([x, y], i) => <circle key={i} cx={x} cy={y} r="3.5" fill={color}/>)}
+    </svg>
+  );
+};
+
 const formatScore = val => {
   const n = Number(val);
   if (isNaN(n) || val === "" || val === undefined) return "—";
@@ -500,6 +545,59 @@ function ragStatus(pct) {
   if (pct >= 0.90) return "green";
   if (pct >= 0.75) return "amber";
   return "red";
+}
+
+// ─── GUARD TIER + TREND HELPERS ──────────────────────────────────────────────
+// T{n} = all four guards (G, M, S, E) equal at level n
+// G{n} = highest guard is n but at least one guard is lower
+function getPlayerTier(player) {
+  const lvls = player?.levels;
+  if (!lvls) return null;
+  const nums = ["G","M","S","E"].map(k => {
+    const v = lvls[k];
+    return v ? parseInt(v.slice(1)) : null;
+  });
+  if (nums.some(n => n === null || isNaN(n))) return null;
+  const max = Math.max(...nums);
+  return nums.every(n => n === max) ? `T${max}` : `G${max}`;
+}
+
+function getClanTierBreakdown(clan) {
+  const players = storage.getPlayers().filter(p => p.clan === clan && p.active);
+  const tierMap = {};
+  players.forEach(p => {
+    const tier = getPlayerTier(p) || "?";
+    tierMap[tier] = (tierMap[tier] || 0) + 1;
+  });
+  const sortKey = t => {
+    if (t === "?") return -999;
+    const n = parseInt(t.slice(1));
+    return t.startsWith("T") ? n * 2 + 1 : n * 2;
+  };
+  return Object.entries(tierMap)
+    .sort((a, b) => sortKey(b[0]) - sortKey(a[0]))
+    .map(([tier, count]) => ({ tier, count }));
+}
+
+function getClanEventTotals(clan, eventId) {
+  const allScores = storage.getScores();
+  const allPlayers = storage.getPlayers().filter(p => p.clan === clan && p.active);
+  const entries = allScores[`${clan}_${eventId}`] || [];
+  const ev = EVENT_TYPES.find(e => e.id === eventId);
+  if (!ev || !entries.length) return [];
+  const fk = ev.fields[0].key;
+  return [...entries].reverse().map(entry => {
+    const total = allPlayers.reduce((sum, p) => {
+      const v = Number(entry.scores?.[p.id]?.[fk]);
+      return sum + (isNaN(v) ? 0 : v);
+    }, 0);
+    return { date: entry.date?.slice(0, 10) || "", total };
+  });
+}
+
+function getClanNormsForEvent(clan, eventId) {
+  const norms = storage.getNorms();
+  return (norms[clan] && norms[clan][eventId]) ? norms[clan][eventId] : {};
 }
 
 function getClanHealthMetrics(clan, eventId) {
@@ -2054,6 +2152,15 @@ const ClanHealthCard = ({ clan, metrics, onDrillDown }) => {
           <div style={{ fontSize:9, color:"#94a3b8", marginTop:2 }}>cross-clan average</div>
         </div>
       </div>
+      {getClanTierBreakdown(clan).length > 0 && (
+        <div style={{ marginTop:8, display:"flex", gap:4, flexWrap:"wrap" }}>
+          {getClanTierBreakdown(clan).map(({ tier, count }) => (
+            <span key={tier} style={{ fontSize:10, fontWeight:700, padding:"2px 7px", borderRadius:6, backgroundColor:tier.startsWith("T")?"#f5f3ff":"#f1f5f9", color:tier.startsWith("T")?"#7c3aed":"#475569", fontFamily:"'DM Mono',monospace" }}>
+              {tier} ×{count}
+            </span>
+          ))}
+        </div>
+      )}
     </Card>
   );
 };
@@ -2100,6 +2207,20 @@ const ClanHealthDrillDown = ({ clan, eventId, onBack }) => {
           <div style={{ flex:1, backgroundColor:clanRagC.bg, borderRadius:8, padding:"8px 10px" }}>
             <div style={{ fontSize:9, color:"#94a3b8", fontWeight:700, textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:2 }}>Clan vs Norm</div>
             <div style={{ fontSize:16, fontWeight:800, color:clanRagC.dot, fontFamily:"'DM Mono',monospace" }}>{clanNormP !== null ? `${clanNormP}%` : "—"}</div>
+          </div>
+        </div>
+      )}
+
+      {/* Guard tier breakdown */}
+      {getClanTierBreakdown(clan).length > 0 && (
+        <div style={{ marginBottom:12 }}>
+          <div style={{ fontSize:9, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:"0.06em", marginBottom:6 }}>Guard Tiers</div>
+          <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
+            {getClanTierBreakdown(clan).map(({ tier, count }) => (
+              <span key={tier} style={{ fontSize:11, fontWeight:700, padding:"3px 9px", borderRadius:6, backgroundColor:tier.startsWith("T")?"#f5f3ff":"#f1f5f9", color:tier.startsWith("T")?"#7c3aed":"#475569", fontFamily:"'DM Mono',monospace" }}>
+                {tier} ×{count}
+              </span>
+            ))}
           </div>
         </div>
       )}
@@ -2181,8 +2302,7 @@ const TrendsScreen = () => {
   const { role, clan: sessionClan } = useSession();
   const lockedClan = role === "clan" ? sessionClan : null;
   const [view,         setView]         = useState("health");
-  const [healthEvent,  setHealthEvent]  = useState(null);
-  const [drillClan,    setDrillClan]    = useState(null);
+  const [healthClan,   setHealthClan]   = useState(lockedClan || "All");
   const [clan,         setClan]         = useState(lockedClan || "69R");
   const [viewPlayer,   setViewPlayer]   = useState(null);
   const [nameFilter,   setNameFilter]   = useState("");
@@ -2190,9 +2310,10 @@ const TrendsScreen = () => {
   const [sortBy,       setSortBy]       = useState("name");
   const [sortDir,      setSortDir]      = useState("asc");
   const [showAvg,      setShowAvg]      = useState(false);
+  const [scoreMode,    setScoreMode]    = useState("grid"); // "grid" | "norms" | "top"
+  const [normsEvent,   setNormsEvent]   = useState(EVENT_TYPES[0]?.id || "");
 
   if (viewPlayer) return <PlayerDetail player={viewPlayer} onBack={()=>setViewPlayer(null)}/>;
-  if (drillClan)  return <ClanHealthDrillDown clan={drillClan} eventId={healthEvent} onBack={()=>setDrillClan(null)}/>;
 
   const allPlayers    = storage.getPlayers().filter(p => p.clan === clan && p.active);
   const visibleEvents = EVENT_TYPES.filter(ev => !hiddenEvents.has(ev.id));
@@ -2259,34 +2380,98 @@ const TrendsScreen = () => {
       </div>
 
       {/* ── Clan Health view ── */}
-      {view === "health" && (
-        <>
-          <div style={{ display:"flex", gap:6, overflowX:"auto", paddingBottom:4, marginBottom:14 }}>
-            <button onClick={()=>setHealthEvent(null)}
-              style={{ flexShrink:0, padding:"5px 12px", borderRadius:16, border:`1.5px solid ${!healthEvent?"#1e293b":"#e2e8f0"}`, fontSize:11, fontWeight:700, cursor:"pointer",
-                backgroundColor:!healthEvent?"#1e293b":"#f8fafc", color:!healthEvent?"#fff":"#94a3b8", fontFamily:"'DM Mono',monospace" }}>
-              All Events
-            </button>
-            {EVENT_TYPES.map(ev=>(
-              <button key={ev.id} onClick={()=>setHealthEvent(ev.id)}
-                style={{ flexShrink:0, padding:"5px 12px", borderRadius:16, border:`1.5px solid ${healthEvent===ev.id?"#1e293b":"#e2e8f0"}`, fontSize:11, fontWeight:700, cursor:"pointer",
-                  backgroundColor:healthEvent===ev.id?"#1e293b":"#f8fafc", color:healthEvent===ev.id?"#fff":"#94a3b8", fontFamily:"'DM Mono',monospace" }}>
-                {abbrev(ev.name)}
-              </button>
+      {view === "health" && (() => {
+        const clansToShow = healthClan === "All" ? CLANS : [healthClan];
+        return (
+          <>
+            {/* Clan picker */}
+            <div style={{ display:"flex", gap:8, marginBottom:16 }}>
+              {(lockedClan ? [lockedClan] : ["All", ...CLANS]).map(c => (
+                <button key={c} onClick={()=>setHealthClan(c)}
+                  style={{ flex:1, padding:"9px 0", borderRadius:20, border:"none", fontSize:13, fontWeight:700, cursor:"pointer",
+                    fontFamily:"'DM Mono',monospace",
+                    backgroundColor:healthClan===c?"#1e293b":"#f1f5f9",
+                    color:healthClan===c?"#fff":"#475569" }}>
+                  {c}
+                </button>
+              ))}
+            </div>
+
+            {/* Guard Mix */}
+            <div style={{ marginBottom:20 }}>
+              <div style={{ fontSize:10, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:10 }}>Guard Mix</div>
+              {clansToShow.map(c => {
+                const tiers = getClanTierBreakdown(c);
+                const playerCount = storage.getPlayers().filter(p=>p.clan===c&&p.active).length;
+                return (
+                  <div key={c} style={{ backgroundColor:"#fff", borderRadius:12, padding:"12px 14px", marginBottom:8, boxShadow:"0 1px 4px rgba(0,0,0,0.07),0 0 0 1px rgba(0,0,0,0.04)" }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:tiers.length?10:0 }}>
+                      <span style={{ fontFamily:"'DM Mono',monospace", fontWeight:800, color:CLAN_COLORS[c]||"#1e293b", fontSize:14 }}>{c}</span>
+                      <span style={{ fontSize:11, color:"#94a3b8" }}>{playerCount} active</span>
+                    </div>
+                    {tiers.length > 0 ? (
+                      <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                        {tiers.map(({ tier, count }) => (
+                          <div key={tier} style={{ display:"flex", flexDirection:"column", alignItems:"center", backgroundColor:tier.startsWith("T")?"#f5f3ff":"#f1f5f9", borderRadius:8, padding:"6px 14px", minWidth:52 }}>
+                            <span style={{ fontFamily:"'DM Mono',monospace", fontWeight:800, fontSize:15, color:tier.startsWith("T")?"#7c3aed":"#475569" }}>{tier}</span>
+                            <span style={{ fontSize:10, color:"#94a3b8", marginTop:1 }}>×{count}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <span style={{ fontSize:12, color:"#94a3b8" }}>No guard level data</span>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Trend Charts — Weekly Chests & Epic Chests */}
+            {[
+              { id:"weekly_chests", label:"Weekly Chests" },
+              { id:"epic_chests",   label:"Epic Chests"   },
+            ].map(({ id, label }) => (
+              <div key={id} style={{ marginBottom:20 }}>
+                <div style={{ fontSize:10, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:"0.08em", marginBottom:10 }}>{label}</div>
+                {clansToShow.map(c => {
+                  const data = getClanEventTotals(c, id);
+                  const latestTotal = data[data.length-1]?.total;
+                  return (
+                    <div key={c} style={{ backgroundColor:"#fff", borderRadius:12, padding:"12px 14px", marginBottom:8, boxShadow:"0 1px 4px rgba(0,0,0,0.07),0 0 0 1px rgba(0,0,0,0.04)" }}>
+                      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 }}>
+                        <span style={{ fontFamily:"'DM Mono',monospace", fontWeight:800, color:CLAN_COLORS[c]||"#1e293b", fontSize:14 }}>{c}</span>
+                        {data.length > 0 && (
+                          <span style={{ fontSize:11, fontWeight:600, color:"#64748b", fontFamily:"'DM Mono',monospace" }}>
+                            {data.length} {data.length===1?"entry":"entries"} · latest {formatScore(latestTotal)}
+                          </span>
+                        )}
+                      </div>
+                      {data.length >= 2 ? (
+                        <>
+                          <Sparkline data={data} color={CLAN_COLORS[c]||"#3b82f6"} height={50}/>
+                          <div style={{ display:"flex", justifyContent:"space-between", marginTop:4 }}>
+                            <span style={{ fontSize:9, color:"#94a3b8" }}>{data[0]?.date}</span>
+                            <span style={{ fontSize:9, color:"#94a3b8" }}>{data[data.length-1]?.date}</span>
+                          </div>
+                        </>
+                      ) : (
+                        <div style={{ height:40, backgroundColor:"#f8fafc", borderRadius:6, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                          <span style={{ fontSize:11, color:"#94a3b8" }}>{data.length===0?"No data yet":"Need 2+ entries for chart"}</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             ))}
-          </div>
-          <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
-            {(lockedClan ? [lockedClan] : CLANS).map(c=>(
-              <ClanHealthCard key={c} clan={c} metrics={getClanHealthMetrics(c, healthEvent)} onDrillDown={()=>setDrillClan(c)}/>
-            ))}
-          </div>
-        </>
-      )}
+          </>
+        );
+      })()}
 
       {/* ── Score Grid view ── */}
       {view === "scores" && <>
 
-      <div style={{ display:"flex", gap:8, marginBottom:14 }}>
+      <div style={{ display:"flex", gap:8, marginBottom:10 }}>
         {(lockedClan ? [lockedClan] : CLANS).map(c => (
           <button key={c} onClick={()=>{ if(!lockedClan){ setClan(c); setSortBy("name"); setSortDir("asc"); } }}
             style={{ flex:1, padding:"9px 0", borderRadius:20, border:"none", fontSize:13, fontWeight:700, cursor:lockedClan?"default":"pointer", fontFamily:"'DM Mono',monospace", backgroundColor:clan===c?"#1e293b":"#f1f5f9", color:clan===c?"#fff":"#475569" }}>
@@ -2295,6 +2480,18 @@ const TrendsScreen = () => {
         ))}
       </div>
 
+      <div style={{ display:"flex", backgroundColor:"#f1f5f9", borderRadius:10, padding:3, marginBottom:14 }}>
+        {[{id:"grid",label:"Score Grid"},{id:"norms",label:"Below Norm"},{id:"top",label:"Top Players"}].map(opt=>(
+          <button key={opt.id} onClick={()=>setScoreMode(opt.id)}
+            style={{ flex:1, padding:"7px 0", borderRadius:8, border:"none", cursor:"pointer", fontSize:12, fontWeight:700,
+              backgroundColor:scoreMode===opt.id?"#1e293b":"transparent",
+              color:scoreMode===opt.id?"#fff":"#94a3b8", transition:"all 0.15s" }}>
+            {opt.label}
+          </button>
+        ))}
+      </div>
+
+      {scoreMode === "grid" && <>
       <div style={{ position:"relative", marginBottom:12 }}>
         <input
           value={nameFilter}
@@ -2391,6 +2588,132 @@ const TrendsScreen = () => {
           </div>
         </div>
       )}
+      </>}
+
+      {/* ── Below Norm view ── */}
+      {scoreMode === "norms" && (
+        <div>
+          <div style={{ display:"flex", gap:6, overflowX:"auto", paddingBottom:4, marginBottom:12 }}>
+            {EVENT_TYPES.map(ev => (
+              <button key={ev.id} onClick={()=>setNormsEvent(ev.id)}
+                style={{ flexShrink:0, padding:"5px 12px", borderRadius:16, border:`1.5px solid ${normsEvent===ev.id?"#1e293b":"#e2e8f0"}`, fontSize:11, fontWeight:700, cursor:"pointer",
+                  backgroundColor:normsEvent===ev.id?"#1e293b":"#f8fafc", color:normsEvent===ev.id?"#fff":"#94a3b8", fontFamily:"'DM Mono',monospace" }}>
+                {abbrev(ev.name)}
+              </button>
+            ))}
+          </div>
+          {(() => {
+            const ev = EVENT_TYPES.find(e => e.id === normsEvent);
+            if (!ev) return null;
+            const fk = ev.fields[0].key;
+            const clanNorms = getClanNormsForEvent(clan, normsEvent);
+            const entries = (storage.getScores()[`${clan}_${normsEvent}`] || []);
+            const latest = entries[0];
+            if (!Object.keys(clanNorms).length) {
+              return <div style={{ textAlign:"center", padding:"24px 0", color:"#94a3b8", fontSize:13 }}>No norms set for {clan} / {ev.name}.<br/>Set them in Admin → Performance Norms.</div>;
+            }
+            if (!latest) {
+              return <div style={{ textAlign:"center", padding:"24px 0", color:"#94a3b8", fontSize:13 }}>No score data yet for {ev.name}.</div>;
+            }
+            const belowNorm = allPlayers.map(p => {
+              const score = Number(latest.scores?.[p.id]?.[fk]);
+              const tier = getPlayerTier(p);
+              const normVal = tier != null ? clanNorms[tier] : undefined;
+              if (normVal === undefined || normVal === null || isNaN(score)) return null;
+              return { player: p, score, normVal, gap: score - normVal, tier };
+            }).filter(Boolean).filter(r => r.gap < 0).sort((a, b) => a.gap - b.gap);
+
+            if (!belowNorm.length) {
+              return (
+                <div style={{ textAlign:"center", padding:"24px 0" }}>
+                  <div style={{ fontSize:32, marginBottom:8 }}>🎉</div>
+                  <div style={{ fontSize:14, fontWeight:700, color:"#16a34a" }}>All players are meeting their norms!</div>
+                </div>
+              );
+            }
+            return (
+              <div>
+                <div style={{ fontSize:11, color:"#94a3b8", marginBottom:8 }}>
+                  {belowNorm.length} player{belowNorm.length!==1?"s":""} below norm · last entry {latest.date?.slice(0,10)}
+                </div>
+                {belowNorm.map(({ player: p, score, normVal, gap, tier }) => (
+                  <div key={p.id} onClick={()=>setViewPlayer(p)} style={{ display:"flex", alignItems:"center", backgroundColor:"#fff", borderRadius:10, padding:"10px 12px", marginBottom:6, boxShadow:"0 1px 3px rgba(0,0,0,0.06),0 0 0 1px rgba(0,0,0,0.04)", cursor:"pointer" }}>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:2 }}>
+                        <span style={{ fontSize:13, fontWeight:700, color:"#1e293b" }}>{p.name}</span>
+                        {tier && <span style={{ fontSize:9, fontWeight:700, padding:"1px 5px", borderRadius:4, backgroundColor:tier.startsWith("T")?"#f5f3ff":"#f1f5f9", color:tier.startsWith("T")?"#7c3aed":"#475569", fontFamily:"'DM Mono',monospace" }}>{tier}</span>}
+                      </div>
+                      <div style={{ display:"flex", gap:10, fontSize:11 }}>
+                        <span style={{ color:"#1e293b", fontFamily:"'DM Mono',monospace", fontWeight:700 }}>{formatScore(score)}</span>
+                        <span style={{ color:"#94a3b8" }}>norm {formatScore(normVal)}</span>
+                        <span style={{ color:"#dc2626", fontWeight:700, fontFamily:"'DM Mono',monospace" }}>{formatScore(gap)}</span>
+                      </div>
+                    </div>
+                    <Icon name="chevR" size={14} color="#cbd5e1"/>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* ── Top Players view ── */}
+      {scoreMode === "top" && (
+        <div>
+          <div style={{ display:"flex", gap:6, overflowX:"auto", paddingBottom:4, marginBottom:12 }}>
+            {EVENT_TYPES.map(ev => (
+              <button key={ev.id} onClick={()=>setNormsEvent(ev.id)}
+                style={{ flexShrink:0, padding:"5px 12px", borderRadius:16, border:`1.5px solid ${normsEvent===ev.id?"#1e293b":"#e2e8f0"}`, fontSize:11, fontWeight:700, cursor:"pointer",
+                  backgroundColor:normsEvent===ev.id?"#1e293b":"#f8fafc", color:normsEvent===ev.id?"#fff":"#94a3b8", fontFamily:"'DM Mono',monospace" }}>
+                {abbrev(ev.name)}
+              </button>
+            ))}
+          </div>
+          {(() => {
+            const ev = EVENT_TYPES.find(e => e.id === normsEvent);
+            if (!ev) return null;
+            const fk = ev.fields[0].key;
+            const entries = (storage.getScores()[`${clan}_${normsEvent}`] || []);
+            const latest = entries[0];
+            if (!latest) {
+              return <div style={{ textAlign:"center", padding:"24px 0", color:"#94a3b8", fontSize:13 }}>No score data yet for {ev.name}.</div>;
+            }
+            const ranked = allPlayers
+              .map(p => ({ player: p, score: Number(latest.scores?.[p.id]?.[fk]), tier: getPlayerTier(p) }))
+              .filter(r => !isNaN(r.score) && r.score > 0)
+              .sort((a, b) => b.score - a.score);
+
+            if (!ranked.length) {
+              return <div style={{ textAlign:"center", padding:"24px 0", color:"#94a3b8", fontSize:13 }}>No scores recorded for {ev.name} yet.</div>;
+            }
+            const medalBg = ["#f59e0b","#94a3b8","#b45309"];
+            return (
+              <div>
+                <div style={{ fontSize:11, color:"#94a3b8", marginBottom:8 }}>
+                  {ranked.length} player{ranked.length!==1?"s":""} with scores · last entry {latest.date?.slice(0,10)}
+                </div>
+                {ranked.map(({ player: p, score, tier }, i) => (
+                  <div key={p.id} onClick={()=>setViewPlayer(p)} style={{ display:"flex", alignItems:"center", backgroundColor:"#fff", borderRadius:10, padding:"10px 12px", marginBottom:6, boxShadow:"0 1px 3px rgba(0,0,0,0.06),0 0 0 1px rgba(0,0,0,0.04)", cursor:"pointer" }}>
+                    <div style={{ width:28, height:28, borderRadius:8, backgroundColor:i<3?medalBg[i]:"#f1f5f9", display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:800, color:i<3?"#fff":"#64748b", fontFamily:"'DM Mono',monospace", flexShrink:0, marginRight:10 }}>
+                      {i+1}
+                    </div>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:2 }}>
+                        <span style={{ fontSize:13, fontWeight:700, color:"#1e293b" }}>{p.name}</span>
+                        {tier && <span style={{ fontSize:9, fontWeight:700, padding:"1px 5px", borderRadius:4, backgroundColor:tier.startsWith("T")?"#f5f3ff":"#f1f5f9", color:tier.startsWith("T")?"#7c3aed":"#475569", fontFamily:"'DM Mono',monospace" }}>{tier}</span>}
+                      </div>
+                      <span style={{ fontSize:12, fontWeight:800, color:"#1e293b", fontFamily:"'DM Mono',monospace" }}>{formatScore(score)}</span>
+                    </div>
+                    <Icon name="chevR" size={14} color="#cbd5e1"/>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
       </>}
 
     </div>
@@ -3950,6 +4273,112 @@ const AdminCtSyncCard = () => {
   );
 };
 
+// ─── NORMS ADMIN VIEW ─────────────────────────────────────────────────────────
+const NormsAdminView = ({ onBack }) => {
+  const [clan,    setClan]    = useState(CLANS[0]);
+  const [eventId, setEventId] = useState(EVENT_TYPES[0]?.id || "");
+  const [norms,   setNorms]   = useState(() => storage.getNorms());
+  const [saving,  setSaving]  = useState(false);
+  const [saved,   setSaved]   = useState(false);
+
+  // Collect all tiers from all clans' active players
+  const tierSet = new Set();
+  CLANS.forEach(c => storage.getPlayers().filter(p => p.clan === c && p.active).forEach(p => {
+    const t = getPlayerTier(p);
+    if (t) tierSet.add(t);
+  }));
+  // Also include any tiers that already have saved norms for this clan/event
+  Object.keys(norms[clan]?.[eventId] || {}).forEach(t => tierSet.add(t));
+
+  const sortKey = t => { const n = parseInt(t.slice(1)); return t.startsWith("T") ? n*2+1 : n*2; };
+  const tierList = [...tierSet].sort((a, b) => sortKey(b) - sortKey(a));
+
+  const getValue = tier => {
+    const v = norms[clan]?.[eventId]?.[tier];
+    return (v !== undefined && v !== null) ? String(v) : "";
+  };
+
+  const setValue = (tier, val) => {
+    setSaved(false);
+    setNorms(prev => {
+      const n = val === "" ? undefined : Number(val);
+      const evNorms = { ...(prev[clan]?.[eventId] || {}), [tier]: n };
+      if (n === undefined) delete evNorms[tier];
+      return { ...prev, [clan]: { ...(prev[clan] || {}), [eventId]: evNorms } };
+    });
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    await saveNormsToStorage(norms);
+    setSaving(false);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+  };
+
+  const ev = EVENT_TYPES.find(e => e.id === eventId);
+
+  return (
+    <div style={{ padding:"0 16px 16px" }}>
+      <BackBtn onBack={onBack}/>
+      <div style={{ fontSize:18, fontWeight:800, color:"#1e293b", marginBottom:4 }}>Performance Norms</div>
+      <div style={{ fontSize:12, color:"#94a3b8", marginBottom:14 }}>
+        Set minimum score targets per guard tier. Used in the Summary "Below Norm" view.
+      </div>
+
+      <div style={{ display:"flex", gap:8, marginBottom:14 }}>
+        {CLANS.map(c => (
+          <button key={c} onClick={()=>setClan(c)}
+            style={{ flex:1, padding:"9px 0", borderRadius:20, border:"none", fontSize:13, fontWeight:700, cursor:"pointer", fontFamily:"'DM Mono',monospace", backgroundColor:clan===c?"#1e293b":"#f1f5f9", color:clan===c?"#fff":"#475569" }}>
+            {c}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ display:"flex", gap:6, overflowX:"auto", paddingBottom:4, marginBottom:14 }}>
+        {EVENT_TYPES.map(e => (
+          <button key={e.id} onClick={()=>setEventId(e.id)}
+            style={{ flexShrink:0, padding:"5px 12px", borderRadius:16, border:`1.5px solid ${eventId===e.id?"#1e293b":"#e2e8f0"}`, fontSize:11, fontWeight:700, cursor:"pointer",
+              backgroundColor:eventId===e.id?"#1e293b":"#f8fafc", color:eventId===e.id?"#fff":"#94a3b8", fontFamily:"'DM Mono',monospace" }}>
+            {abbrev(e.name)}
+          </button>
+        ))}
+      </div>
+
+      {tierList.length === 0 ? (
+        <div style={{ textAlign:"center", padding:"24px 0", color:"#94a3b8", fontSize:13 }}>
+          No players with guard level data in any clan yet.
+        </div>
+      ) : (
+        <>
+          <div style={{ fontSize:11, color:"#94a3b8", marginBottom:10 }}>
+            {ev?.name} · {clan} · Minimum {ev?.fields[0]?.label || "score"} per tier
+          </div>
+          <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom:16 }}>
+            {tierList.map(tier => (
+              <div key={tier} style={{ display:"flex", alignItems:"center", backgroundColor:"#fff", borderRadius:10, padding:"10px 14px", boxShadow:"0 1px 3px rgba(0,0,0,0.06),0 0 0 1px rgba(0,0,0,0.04)", gap:12 }}>
+                <span style={{ fontFamily:"'DM Mono',monospace", fontWeight:800, fontSize:15, color:tier.startsWith("T")?"#7c3aed":"#1e293b", width:36, flexShrink:0 }}>{tier}</span>
+                <span style={{ fontSize:11, color:"#94a3b8", flex:1 }}>
+                  {tier.startsWith("T") ? "All guards equal" : `Highest guard = ${tier.slice(1)}`}
+                </span>
+                <input type="number" min="0" placeholder="—"
+                  value={getValue(tier)}
+                  onChange={e => setValue(tier, e.target.value)}
+                  style={{ width:90, padding:"7px 10px", borderRadius:8, border:"1.5px solid #e2e8f0", fontSize:14, fontWeight:700, fontFamily:"'DM Mono',monospace", color:"#1e293b", textAlign:"right" }}
+                />
+              </div>
+            ))}
+          </div>
+          <button onClick={handleSave} disabled={saving}
+            style={{ width:"100%", padding:"14px 0", borderRadius:12, border:"none", backgroundColor:saved?"#16a34a":"#1e293b", color:"#fff", fontSize:15, fontWeight:700, cursor:"pointer", transition:"background-color 0.2s" }}>
+            {saving ? "Saving…" : saved ? "Saved ✓" : "Save Norms"}
+          </button>
+        </>
+      )}
+    </div>
+  );
+};
+
 // ─── ADMIN SCREEN ─────────────────────────────────────────────────────────────
 const AdminScreen = () => {
   const [view,         setView]         = useState("home");
@@ -4013,6 +4442,7 @@ const AdminScreen = () => {
   if (view==="deletePlayers")     return <DeletePlayerView onBack={()=>{ setView("home"); forceUpdate(); }}/>;
   if (view==="fragments")         return <FragmentDistributionView onBack={()=>{ setView("home"); forceUpdate(); }}/>;
   if (view==="changePins")        return <ChangePinView onBack={()=>setView("home")}/>;
+  if (view==="norms")             return <NormsAdminView onBack={()=>setView("home")}/>;
 
   const { pending, missingGuard, suggestedInactive, total } = getActionItems();
   const activePlayers = storage.getPlayers().filter(p=>p.active).length;
@@ -4099,6 +4529,20 @@ const AdminScreen = () => {
             </Card>
           ))}
         </div>
+      </div>
+
+      <div style={{ marginBottom:20 }}>
+        <SecHeader title="Performance"/>
+        <Card onClick={()=>setView("norms")} style={{ display:"flex", alignItems:"center", gap:14 }}>
+          <div style={{ width:40, height:40, borderRadius:10, backgroundColor:"#7c3aed15", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
+            <Icon name="trophy" size={19} color="#7c3aed"/>
+          </div>
+          <div style={{ flex:1 }}>
+            <div style={{ fontSize:14, fontWeight:600, color:"#1e293b" }}>Performance Norms</div>
+            <div style={{ fontSize:12, color:"#94a3b8", marginTop:1 }}>Set score targets per clan, event &amp; tier</div>
+          </div>
+          <Icon name="chevR" size={16} color="#cbd5e1"/>
+        </Card>
       </div>
 
       <div style={{ marginBottom:20 }}>

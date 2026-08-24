@@ -26,6 +26,7 @@
 //   A21 → { pins: { super, 69R, 69S, 69D, user } }
 //   A22 → { scores: { 69R_epic_chests } }
 //   A24 → { ctSync: { 69R: { lastSync, matched, unmatched } }, ctAliases: { 69R: { "CT Name": "playerId" } } }
+//   A25 → { "69R": { "epic_chests": { "T9": 500, "G9": 400 }, ... }, ... }  ← performance norms
 //
 // Each cell stays well under Google's 50,000 char limit.
 // Entries are pruned per-event — limits are set below based on 130-player clan sizes.
@@ -70,9 +71,20 @@ const SCORE_ROW_MAP = {
 };
 const SCORE_KEYS = Object.keys(SCORE_ROW_MAP);
 
+// Default PINs — used when A21 is empty (first-run or restored from old backup).
+// These are the source of truth for initial PIN values.
+// Once an admin changes a PIN via the app, the new value is stored in A21 and takes over.
+const DEFAULT_PINS = {
+  super: "9999",
+  "69R": "6969",
+  "69S": "6996",
+  "69D": "9669",
+  user:  "1111",
+};
+
 const EMPTY_DATA = {
   players: [], scores: {}, levelRequests: [], rotationLog: [],
-  fragmentDistributions: [], lastBackup: null, pins: null,
+  fragmentDistributions: [], lastBackup: null, pins: DEFAULT_PINS,
   ctSync: {}, ctAliases: {},
 };
 
@@ -105,9 +117,34 @@ function pruneEventDates(eventData, eventId) {
 // ── Read all data ─────────────────────────────────────────────────────────────
 function doGet(e) {
   try {
-    if (e && e.parameter && e.parameter.action === "syncEpicChests") {
+    var action = e && e.parameter && e.parameter.action;
+
+    if (action === "syncEpicChests") {
       return jsonResponse(syncEpicChests());
     }
+
+    // Save PINs via GET so the app can verify the write succeeded (no-cors POST is unverifiable).
+    if (action === "savePins") {
+      var pinsStr = e.parameter.pins;
+      if (!pinsStr) return jsonResponse({ error: "No pins data provided" });
+      var pinsData = JSON.parse(pinsStr);
+      var sheet = getSheet();
+      sheet.getRange("A21").setValue(JSON.stringify({ pins: pinsData }));
+      Logger.log("savePins: wrote to A21 — " + JSON.stringify(pinsData));
+      return jsonResponse({ ok: true });
+    }
+
+    // Save performance norms via GET (same verifiable pattern as savePins).
+    if (action === "saveNorms") {
+      var normsStr = e.parameter.norms;
+      if (!normsStr) return jsonResponse({ error: "No norms data provided" });
+      var normsData = JSON.parse(normsStr);
+      var sheet = getSheet();
+      sheet.getRange("A25").setValue(JSON.stringify(normsData));
+      Logger.log("saveNorms: wrote to A25");
+      return jsonResponse({ ok: true });
+    }
+
     return jsonResponse(readData());
   }
   catch (err) { return jsonResponse({ error: err.message }); }
@@ -142,7 +179,9 @@ function getSheet() {
       var row = SCORE_ROW_MAP[key];
       sheet.getRange("A" + row).setValue(JSON.stringify({ scores: {} }));
     });
+    sheet.getRange("A21").setValue(JSON.stringify({ pins: DEFAULT_PINS }));
     sheet.getRange("A24").setValue(JSON.stringify({ ctSync: {}, ctAliases: {} }));
+    sheet.getRange("A25").setValue(JSON.stringify({}));
   }
   return sheet;
 }
@@ -192,6 +231,8 @@ function readData() {
   var dataA21 = parse(rawA21);
   var rawA24 = sheet.getRange("A24").getValue();
   var dataA24 = parse(rawA24);
+  var rawA25 = sheet.getRange("A25").getValue();
+  var normsData = rawA25 ? parse(rawA25) : {};
 
   return {
     players:               players,
@@ -200,9 +241,10 @@ function readData() {
     levelRequests:         dataA2.levelRequests          || [],
     rotationLog:           dataA2.rotationLog            || [],
     fragmentDistributions: dataA2.fragmentDistributions  || [],
-    pins:                  dataA21.pins                  || null,
+    pins:                  dataA21.pins                  || DEFAULT_PINS,
     ctSync:                dataA24.ctSync                || {},
     ctAliases:             dataA24.ctAliases             || {},
+    norms:                 normsData,
   };
 }
 
