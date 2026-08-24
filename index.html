@@ -104,6 +104,49 @@ async function saveNormsToStorage(norms) {
   }
 }
 
+async function saveAliasToStorage(clan, ctName, playerId) {
+  if (!window._appData) window._appData = {};
+  if (!window._appData.ctAliases) window._appData.ctAliases = {};
+  if (!window._appData.ctAliases[clan]) window._appData.ctAliases[clan] = {};
+  window._appData.ctAliases[clan][ctName] = playerId;
+  if (window._appData.ctIgnored?.[clan]) {
+    window._appData.ctIgnored[clan] = window._appData.ctIgnored[clan].filter(n => n !== ctName);
+  }
+  if (sheetsEnabled()) {
+    const url = SHEETS_URL
+      + "?action=saveAlias"
+      + "&clan="     + encodeURIComponent(clan)
+      + "&ctName="   + encodeURIComponent(ctName)
+      + "&playerId=" + encodeURIComponent(playerId)
+      + "&t="        + Date.now();
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (!data.ok) throw new Error(data.error || "Server error");
+  }
+}
+
+async function saveIgnoredToStorage(clan, ctName) {
+  if (!window._appData) window._appData = {};
+  if (!window._appData.ctIgnored) window._appData.ctIgnored = {};
+  if (!window._appData.ctIgnored[clan]) window._appData.ctIgnored[clan] = [];
+  if (!window._appData.ctIgnored[clan].includes(ctName)) {
+    window._appData.ctIgnored[clan].push(ctName);
+  }
+  if (window._appData.ctAliases?.[clan]?.[ctName]) {
+    delete window._appData.ctAliases[clan][ctName];
+  }
+  if (sheetsEnabled()) {
+    const url = SHEETS_URL
+      + "?action=saveIgnored"
+      + "&clan="   + encodeURIComponent(clan)
+      + "&ctName=" + encodeURIComponent(ctName)
+      + "&t="      + Date.now();
+    const resp = await fetch(url);
+    const data = await resp.json();
+    if (!data.ok) throw new Error(data.error || "Server error");
+  }
+}
+
 function resolvePin(pin) {
   if (!pin) return null;
   const p = getActivePins();
@@ -269,12 +312,13 @@ function showSaveToast(ok, msg) {
 async function saveToSheets(data) {
   if (!sheetsEnabled()) return;
   try {
-    await fetch(SHEETS_URL, {
+    const res = await fetch(SHEETS_URL, {
       method: "POST",
-      mode: "no-cors",
+      redirect: "follow",
       headers: { "Content-Type": "text/plain" },
       body: JSON.stringify(data),
     });
+    if (!res.ok) throw new Error("HTTP " + res.status);
     showSaveToast(true);
   } catch (err) {
     console.warn("Sheets save failed:", err);
@@ -304,7 +348,7 @@ async function syncFromCT() {
 }
 
 const EVENT_TYPES = [
-  { id:"epic_chests",   name:"Epic Chests",   frequency:"Weekly",  fields:[{ key:"score",   label:"Epics"   }], autoSync:true, autoSyncClan:"69R" },
+  { id:"epic_chests",   name:"Epic Chests",   frequency:"Weekly",  fields:[{ key:"score",   label:"Epics"   }], autoSync:true, autoSyncClans:["69R","69S"] },
   { id:"weekly_chests", name:"Weekly Chests", frequency:"7 days",  fields:[{ key:"points",  label:"Points"  }] },
   { id:"tin_man",       name:"Tin Man",       frequency:"6 days",  fields:[{ key:"points",  label:"Points"  }] },
   { id:"ragnarok",      name:"Ragnarök",      frequency:"25 days", fields:[{ key:"points",  label:"Points"  }] },
@@ -374,6 +418,7 @@ const storage = {
   getLastBackup:             ()  => window._appData?.lastBackup             || null,
   getCtSync:                 ()  => window._appData?.ctSync                 || {},
   getCtAliases:              ()  => window._appData?.ctAliases              || {},
+  getCtIgnored:              ()  => window._appData?.ctIgnored              || {},
 
   savePlayers: v => {
     _ensure(); window._appData.players = v;
@@ -1714,7 +1759,8 @@ const EpicChestsView = ({ clan, event, onBack }) => {
   const entries  = scores[scoreKey] || [];
   const latest   = entries[0] || null;
 
-  const [aliasMap,  setAliasMap]  = useState({});
+  const [aliasMap,  setAliasMap]  = useState({});   // { ctName: playerId } pending link choices
+  const [aliasMode, setAliasMode] = useState({});   // { ctName: "link" }
   const [syncing,   setSyncing]   = useState(false);
   const [syncMsg,   setSyncMsg]   = useState("");
   const [saving,    setSaving]    = useState(false);
@@ -1722,7 +1768,10 @@ const EpicChestsView = ({ clan, event, onBack }) => {
 
   const ctSync    = storage.getCtSync()[clan] || {};
   const ctAliases = storage.getCtAliases()[clan] || {};
-  const unmatched = ctSync.unmatched || [];
+  const ctIgnored = storage.getCtIgnored()[clan] || [];
+  const unmatched = (ctSync.unmatched || []).filter(um =>
+    !ctIgnored.includes(um.name) && !ctAliases[um.name]
+  );
 
   const fmtDate = ts => {
     if (!ts) return "Never";
@@ -1748,31 +1797,54 @@ const EpicChestsView = ({ clan, event, onBack }) => {
     }
   };
 
-  const handleSaveAliases = async () => {
-    if (!Object.keys(aliasMap).length) return;
+  const handleLinkAlias = async (ctName) => {
+    const playerId = aliasMap[ctName];
+    if (!playerId) return;
     setSaving(true);
     try {
-      const existing = storage.getCtAliases();
-      const updated  = { ...existing, [clan]: { ...(existing[clan] || {}), ...aliasMap } };
-      if (!window._appData) window._appData = {};
-      window._appData.ctAliases = updated;
-      await saveToSheets(window._appData);
-      setAliasMap({});
-      setSyncMsg("Mappings saved — they will apply on next sync.");
+      await saveAliasToStorage(clan, ctName, playerId);
+      setAliasMode(prev => { const n = {...prev}; delete n[ctName]; return n; });
+      setAliasMap(prev  => { const n = {...prev}; delete n[ctName]; return n; });
+      setSyncMsg(`Linked "${ctName}" — applies on next sync.`);
       forceUpdate(n => n + 1);
-    } catch (e) {
-      setSyncMsg("Save failed: " + e.message);
-    } finally {
-      setSaving(false);
+    } catch (e) { setSyncMsg("Save failed: " + e.message); }
+    finally { setSaving(false); }
+  };
+
+  const handleAddPlayer = async (ctName) => {
+    // Check if a player with this name already exists in this clan
+    const existing = storage.getPlayers().find(p =>
+      p.clan === clan && p.name.toLowerCase().trim() === ctName.toLowerCase().trim()
+    );
+    if (existing) {
+      // Player already exists — just save the alias pointing to them
+      try {
+        await saveAliasToStorage(clan, ctName, existing.id);
+        setSyncMsg(`Linked "${ctName}" to existing player "${existing.name}".`);
+        forceUpdate(n => n + 1);
+      } catch (e) { setSyncMsg("Alias save failed: " + e.message); }
+      return;
     }
+    const newPlayer = { id: uid(), name: ctName, clan, active: true, hero: null, level: null, might: null, levels: { G:null, M:null, S:null, E:null } };
+    storage.savePlayers([...storage.getPlayers(), newPlayer]);
+    try {
+      await saveAliasToStorage(clan, ctName, newPlayer.id);
+      setSyncMsg(`Added "${ctName}" as a new player — applies on next sync.`);
+      forceUpdate(n => n + 1);
+    } catch (e) { setSyncMsg("Player added but alias save failed: " + e.message); }
+  };
+
+  const handleIgnore = async (ctName) => {
+    try {
+      await saveIgnoredToStorage(clan, ctName);
+      setSyncMsg(`"${ctName}" ignored — won't appear after next sync.`);
+      forceUpdate(n => n + 1);
+    } catch (e) { setSyncMsg("Save failed: " + e.message); }
   };
 
   const playerScores = players
     .map(p => ({ player:p, epics: latest?.scores?.[p.id]?.score ?? null }))
     .sort((a,b) => (b.epics ?? -1) - (a.epics ?? -1));
-
-  const linkBg   = c => c ? "#f0fdf4" : "#fff";
-  const linkBdr  = c => c ? "1.5px solid #bbf7d0" : "1px solid #e2e8f0";
 
   return (
     <div>
@@ -1837,33 +1909,62 @@ const EpicChestsView = ({ clan, event, onBack }) => {
           <SecHeader title={`Unmatched Players (${unmatched.length})`}/>
           <Card>
             <p style={{ fontSize:12, color:"#64748b", margin:"0 0 12px" }}>
-              These ChestTracker names didn't match any 69R player. Link them so the next sync picks them up:
+              These ChestTracker names didn't match any {clan} player:
             </p>
-            <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+            <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
               {unmatched.map(um => {
-                const linkedId = aliasMap[um.name] ?? ctAliases[um.name] ?? "";
+                const isLinking = aliasMode[um.name] === "link";
+                const savedAlias = ctAliases[um.name];
                 return (
-                  <div key={um.name} style={{ display:"flex", alignItems:"center", gap:8, padding:"8px 10px", borderRadius:8, backgroundColor:linkBg(linkedId), border:linkBdr(linkedId) }}>
-                    <div style={{ flex:1 }}>
-                      <span style={{ fontSize:13, fontWeight:700, color:"#1e293b" }}>{um.name}</span>
-                      <span style={{ fontSize:11, color:"#94a3b8", marginLeft:6 }}>{um.epics} epics</span>
+                  <div key={um.name} style={{ borderRadius:8, backgroundColor:"#f8fafc", border:"1px solid #e2e8f0", overflow:"hidden" }}>
+                    {/* Name + action buttons row */}
+                    <div style={{ display:"flex", alignItems:"center", gap:8, padding:"9px 12px" }}>
+                      <div style={{ flex:1 }}>
+                        <span style={{ fontSize:13, fontWeight:700, color:"#1e293b" }}>{um.name}</span>
+                        <span style={{ fontSize:11, color:"#94a3b8", marginLeft:6 }}>{um.epics} epics</span>
+                        {savedAlias && <span style={{ fontSize:10, color:"#16a34a", marginLeft:6, fontWeight:700 }}>linked ✓</span>}
+                      </div>
+                      {!isLinking && (
+                        <div style={{ display:"flex", gap:5, flexShrink:0 }}>
+                          <button onClick={() => setAliasMode(prev => ({...prev, [um.name]:"link"}))}
+                            style={{ padding:"4px 9px", borderRadius:6, border:"1px solid #e2e8f0", backgroundColor:"#fff", color:"#1e293b", fontSize:11, fontWeight:700, cursor:"pointer" }}>
+                            Link player
+                          </button>
+                          <button onClick={() => handleAddPlayer(um.name)}
+                            style={{ padding:"4px 9px", borderRadius:6, border:"1px solid #ede9fe", backgroundColor:"#faf5ff", color:"#7c3aed", fontSize:11, fontWeight:700, cursor:"pointer" }}>
+                            Add Player
+                          </button>
+                          <button onClick={() => handleIgnore(um.name)}
+                            style={{ padding:"4px 9px", borderRadius:6, border:"1px solid #e2e8f0", backgroundColor:"#fff", color:"#94a3b8", fontSize:11, fontWeight:700, cursor:"pointer" }}>
+                            Ignore
+                          </button>
+                        </div>
+                      )}
                     </div>
-                    <select value={aliasMap[um.name] ?? ctAliases[um.name] ?? ""}
-                      onChange={e => setAliasMap(prev => ({ ...prev, [um.name]: e.target.value }))}
-                      style={{ padding:"5px 8px", borderRadius:7, border:"1.5px solid #e2e8f0", fontSize:12, color:"#1e293b", backgroundColor:"#fff" }}>
-                      <option value="">— not linked —</option>
-                      {players.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                    </select>
+                    {/* Expanded link dropdown */}
+                    {isLinking && (
+                      <div style={{ display:"flex", gap:6, padding:"0 12px 10px", alignItems:"center" }}>
+                        <select value={aliasMap[um.name] || ""}
+                          onChange={e => setAliasMap(prev => ({...prev, [um.name]: e.target.value}))}
+                          style={{ flex:1, padding:"6px 8px", borderRadius:7, border:"1.5px solid #e2e8f0", fontSize:12, color:"#1e293b", backgroundColor:"#fff" }}>
+                          <option value="">— pick player —</option>
+                          {players.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                        </select>
+                        <button onClick={() => handleLinkAlias(um.name)}
+                          disabled={saving || !aliasMap[um.name]}
+                          style={{ padding:"6px 12px", borderRadius:7, border:"none", backgroundColor: aliasMap[um.name] ? "#1e293b" : "#e2e8f0", color: aliasMap[um.name] ? "#fff" : "#94a3b8", fontSize:12, fontWeight:700, cursor: aliasMap[um.name] ? "pointer" : "not-allowed", whiteSpace:"nowrap" }}>
+                          {saving ? "…" : "Save"}
+                        </button>
+                        <button onClick={() => setAliasMode(prev => { const n={...prev}; delete n[um.name]; return n; })}
+                          style={{ padding:"6px 10px", borderRadius:7, border:"1px solid #e2e8f0", backgroundColor:"#fff", color:"#64748b", fontSize:12, cursor:"pointer" }}>
+                          ✕
+                        </button>
+                      </div>
+                    )}
                   </div>
                 );
               })}
             </div>
-            <button onClick={handleSaveAliases}
-              disabled={saving || !Object.keys(aliasMap).length}
-              style={{ marginTop:12, width:"100%", padding:"10px", borderRadius:8, border:"none", backgroundColor: saving || !Object.keys(aliasMap).length ? "#e2e8f0" : "#1e293b", color: saving || !Object.keys(aliasMap).length ? "#94a3b8" : "#fff", fontSize:14, fontWeight:700, cursor: !Object.keys(aliasMap).length ? "not-allowed" : "pointer" }}>
-              <Icon name="link" size={15} color={!Object.keys(aliasMap).length ? "#94a3b8" : "#fff"}/>{" "}
-              {saving ? "Saving…" : "Save Mappings"}
-            </button>
           </Card>
         </div>
       )}
@@ -1911,7 +2012,7 @@ const ScoreEntryScreen = () => {
           <BackBtn onBack={()=>setSelClan(null)}/>
           <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:16 }}><ClanBadge clan={selClan}/><span style={{ fontSize:15, fontWeight:600, color:"#1e293b" }}>Select Event</span></div>
           <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-            {EVENT_TYPES.filter(ev => !ev.autoSyncClan || ev.autoSyncClan === selClan).map(ev=>(
+            {EVENT_TYPES.filter(ev => !ev.autoSyncClans || ev.autoSyncClans.includes(selClan)).map(ev=>(
               <Card key={ev.id} onClick={()=>setSelEvent(ev)} style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
                 <div>
                   <div style={{ display:"flex", alignItems:"center", gap:6 }}>
@@ -4220,7 +4321,7 @@ const AdminCtSyncCard = () => {
   const [syncing,  setSyncing]  = useState(false);
   const [msg,      setMsg]      = useState("");
   const [, refresh] = useState(0);
-  const ctSync = storage.getCtSync()["69R"] || {};
+  const allCtSync = storage.getCtSync();
   const fmtDate = ts => {
     if (!ts) return "Never";
     const d = new Date(ts);
@@ -4232,7 +4333,10 @@ const AdminCtSyncCard = () => {
     try {
       const result = await syncFromCT();
       if (result.success) {
-        setMsg(`Done — ${result.matched} matched, ${result.unmatched} unmatched.`);
+        const parts = ["69R","69S"].map(c =>
+          result[c] ? `${c}: ${result[c].matched} matched, ${result[c].unmatched} unmatched` : ""
+        ).filter(Boolean);
+        setMsg("Done — " + parts.join(" · "));
         refresh(n => n + 1);
       } else {
         setMsg("Failed: " + (result.error || "unknown error"));
@@ -4242,26 +4346,35 @@ const AdminCtSyncCard = () => {
   };
   return (
     <Card>
-      <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:10 }}>
         <div style={{ width:40, height:40, borderRadius:10, backgroundColor:"#f0f9ff", display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0 }}>
           <Icon name="sync" size={19} color="#0ea5e9"/>
         </div>
         <div style={{ flex:1 }}>
-          <div style={{ fontSize:14, fontWeight:600, color:"#1e293b" }}>Epic Chests — 69R</div>
-          <div style={{ fontSize:12, color:"#64748b", marginTop:2 }}>
-            Last sync: {fmtDate(ctSync.lastSync)}
-          </div>
-          {ctSync.lastSync && (
-            <div style={{ fontSize:11, color:"#94a3b8", marginTop:1 }}>
-              {ctSync.matched ?? 0} matched · {(ctSync.unmatched || []).length} unmatched
-            </div>
-          )}
+          <div style={{ fontSize:14, fontWeight:600, color:"#1e293b" }}>Epic Chests — ChestTracker</div>
+          <div style={{ fontSize:12, color:"#64748b", marginTop:1 }}>Syncs 69R and 69S from the same account</div>
         </div>
         <button onClick={handleSync} disabled={syncing}
           style={{ padding:"7px 14px", borderRadius:8, border:"none", backgroundColor:syncing?"#94a3b8":"#0ea5e9", color:"#fff", fontSize:12, fontWeight:700, cursor:syncing?"not-allowed":"pointer" }}>
           {syncing ? "…" : "Sync Now"}
         </button>
       </div>
+      {["69R","69S"].map(clan => {
+        const cs = allCtSync[clan] || {};
+        return (
+          <div key={clan} style={{ display:"flex", alignItems:"center", gap:8, paddingTop:6, borderTop:"1px solid #f1f5f9" }}>
+            <span style={{ fontSize:11, fontWeight:700, color:"#64748b", width:28 }}>{clan}</span>
+            <div style={{ flex:1 }}>
+              <div style={{ fontSize:12, color:"#64748b" }}>Last sync: {fmtDate(cs.lastSync)}</div>
+              {cs.lastSync && (
+                <div style={{ fontSize:11, color:"#94a3b8" }}>
+                  {cs.matched ?? 0} matched · {(cs.unmatched || []).length} unmatched
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })}
       {msg && <div style={{ fontSize:12, color:"#475569", marginTop:8, padding:"7px 10px", backgroundColor:"#f8fafc", borderRadius:7, border:"1px solid #e2e8f0" }}>{msg}</div>}
       <div style={{ fontSize:11, color:"#94a3b8", marginTop:10, borderTop:"1px solid #f1f5f9", paddingTop:8 }}>
         Auto-syncs every Sunday at 10pm via the Apps Script time trigger.
