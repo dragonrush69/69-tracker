@@ -585,7 +585,7 @@ const RAG_COLS = {
   grey:  { dot:"#94a3b8", bg:"#f8fafc" },
 };
 
-const CLAN_COLORS = { "69R":"#dc2626", "69S":"#2563eb", "69D":"#16a34a" };
+const CLAN_COLORS = { "69R":"#7c3aed", "69S":"#2563eb", "69D":"#16a34a" };
 
 function ragStatus(pct) {
   if (pct === null || pct === undefined) return "grey";
@@ -1009,7 +1009,7 @@ const Icon = ({ name, size=22, color="currentColor" }) => {
 
 // ─── SHARED COMPONENTS ────────────────────────────────────────────────────────
 const ClanBadge = ({ clan }) => {
-  const colors = { "69R":"#dc2626","69S":"#2563eb","69D":"#16a34a" };
+  const colors = { "69R":"#7c3aed","69S":"#2563eb","69D":"#16a34a" };
   return <span style={{ backgroundColor:colors[clan]+"18", color:colors[clan], border:`1px solid ${colors[clan]}40`, borderRadius:6, padding:"2px 8px", fontSize:12, fontWeight:700, fontFamily:"'DM Mono',monospace" }}>{clan}</span>;
 };
 
@@ -2403,15 +2403,152 @@ const ClanHealthDrillDown = ({ clan, eventId, onBack }) => {
   );
 };
 
+// ─── TIER DRILLDOWN SHEET ─────────────────────────────────────────────────────
+// Bottom sheet shown when an admin taps a tier badge in the Guard Mix.
+// Lets them update guard levels, mark inactive, or rotate clan — all atomic saves.
+const TierDrilldownSheet = ({ tier, clan, isAdmin, onClose, forceUpdate }) => {
+  const [confirmInactive, setConfirmInactive] = React.useState(null);
+  const [confirmRotate,   setConfirmRotate]   = React.useState(null);
+
+  const allPlayers = storage.getPlayers();
+  const players = allPlayers.filter(p => p.clan === clan && p.active && getPlayerTier(p) === tier);
+
+  const saveLevel = (playerId, type, val) => {
+    window._appData.players = allPlayers.map(p =>
+      p.id === playerId ? { ...p, levels: { ...p.levels, [type]: val || null } } : p
+    );
+    saveToSheets(window._appData);
+    forceUpdate();
+  };
+
+  const doMarkInactive = (player) => {
+    window._appData.players = storage.getPlayers().map(p =>
+      p.id === player.id ? { ...p, active: false } : p
+    );
+    saveToSheets(window._appData);
+    setConfirmInactive(null);
+    onClose();
+    forceUpdate();
+  };
+
+  const doRotate = (player, toClan) => {
+    const logEntry = { id: uid(), playerId: player.id, playerName: player.name, fromClan: player.clan, toClan, date: today() };
+    window._appData.players    = storage.getPlayers().map(p => p.id === player.id ? { ...p, clan: toClan } : p);
+    window._appData.rotationLog = [logEntry, ...(window._appData.rotationLog || [])];
+    saveToSheets(window._appData);
+    setConfirmRotate(null);
+    onClose();
+    forceUpdate();
+  };
+
+  const tierColor = tier.startsWith("T") ? "#7c3aed" : "#475569";
+  const tierBg    = tier.startsWith("T") ? "#f5f3ff" : "#f1f5f9";
+
+  return (
+    <>
+      {/* Backdrop */}
+      <div onClick={onClose} style={{ position:"fixed", inset:0, backgroundColor:"rgba(0,0,0,0.45)", zIndex:200 }}/>
+
+      {/* Sheet */}
+      <div style={{ position:"fixed", bottom:0, left:0, right:0, backgroundColor:"#fff", borderRadius:"20px 20px 0 0", zIndex:201, maxHeight:"82vh", display:"flex", flexDirection:"column", maxWidth:430, margin:"0 auto" }}>
+
+        {/* Header */}
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"18px 20px 14px", borderBottom:"1px solid #f1f5f9", flexShrink:0 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+            <span style={{ fontFamily:"'DM Mono',monospace", fontWeight:800, fontSize:20, color:tierColor, backgroundColor:tierBg, borderRadius:8, padding:"4px 12px" }}>{tier}</span>
+            <ClanBadge clan={clan}/>
+            <span style={{ fontSize:13, color:"#94a3b8" }}>{players.length} player{players.length !== 1 ? "s" : ""}</span>
+          </div>
+          <button onClick={onClose} style={{ border:"none", background:"none", fontSize:22, color:"#94a3b8", cursor:"pointer", lineHeight:1, padding:"0 4px" }}>×</button>
+        </div>
+
+        {/* Player list */}
+        <div style={{ overflowY:"auto", padding:"12px 20px 32px", flex:1 }}>
+          {players.length === 0 && (
+            <div style={{ textAlign:"center", color:"#94a3b8", padding:"32px 0", fontSize:13 }}>No players at this tier</div>
+          )}
+          {players.map((p, i) => (
+            <div key={p.id} style={{ paddingBottom:16, marginBottom:16, borderBottom: i < players.length - 1 ? "1px solid #f1f5f9" : "none" }}>
+              <div style={{ fontWeight:700, fontSize:15, color:"#1e293b", marginBottom:10 }}>{p.name}</div>
+
+              {/* Guard level selectors */}
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:6, marginBottom: isAdmin ? 8 : 0 }}>
+                {Object.entries(LEVEL_TYPES).map(([type, cfg]) => (
+                  <div key={type}>
+                    <div style={{ fontSize:10, fontWeight:700, color:"#94a3b8", textTransform:"uppercase", letterSpacing:"0.05em", marginBottom:3 }}>{cfg.label}</div>
+                    {isAdmin ? (
+                      <SelField
+                        value={p.levels?.[type] || ""}
+                        onChange={v => saveLevel(p.id, type, v)}
+                        options={cfg.levels.map(l => ({ value:l, label:l }))}
+                        placeholder="Not set"
+                      />
+                    ) : (
+                      <div style={{ padding:"8px 10px", backgroundColor:"#f8fafc", borderRadius:8, fontSize:13, fontWeight:700, fontFamily:"'DM Mono',monospace", color:"#1e293b" }}>
+                        {p.levels?.[type] || "—"}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {/* Admin actions: rotate clan + mark inactive */}
+              {isAdmin && (
+                <div style={{ display:"flex", gap:8, marginTop:4 }}>
+                  <select
+                    value=""
+                    onChange={e => e.target.value && setConfirmRotate({ player: p, toClan: e.target.value })}
+                    style={{ flex:1, padding:"9px 12px", borderRadius:10, border:"1.5px solid #e2e8f0", fontSize:13, color:"#475569", cursor:"pointer", backgroundColor:"#fff" }}
+                  >
+                    <option value="">Move to clan…</option>
+                    {CLANS.filter(c => c !== clan).map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <Btn variant="danger" size="sm" onClick={() => setConfirmInactive(p)}>Inactive</Btn>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Confirm: mark inactive */}
+      {confirmInactive && (
+        <Modal
+          title={`Deactivate ${confirmInactive.name}?`}
+          message={`${confirmInactive.name} will be marked inactive and hidden from score entry. You can reactivate them any time.`}
+          confirmLabel="Deactivate"
+          confirmVariant="danger"
+          onConfirm={() => doMarkInactive(confirmInactive)}
+          onCancel={() => setConfirmInactive(null)}
+        />
+      )}
+
+      {/* Confirm: rotate clan */}
+      {confirmRotate && (
+        <Modal
+          title={`Move ${confirmRotate.player.name} to ${confirmRotate.toClan}?`}
+          message={`${confirmRotate.player.name} will move from ${clan} to ${confirmRotate.toClan}. This rotation will be logged.`}
+          confirmLabel="Confirm Move"
+          confirmVariant="primary"
+          onConfirm={() => doRotate(confirmRotate.player, confirmRotate.toClan)}
+          onCancel={() => setConfirmRotate(null)}
+        />
+      )}
+    </>
+  );
+};
+
 // ─── TRENDS SCREEN ────────────────────────────────────────────────────────────
 const TrendsScreen = () => {
   const { role, clan: sessionClan } = useSession();
   const lockedClan = role === "clan" ? sessionClan : null;
-  const [view,         setView]         = useState("health");
-  const [healthClan,   setHealthClan]   = useState(lockedClan || "All");
-  const [clan,         setClan]         = useState(lockedClan || "69R");
-  const [viewPlayer,   setViewPlayer]   = useState(null);
-  const [nameFilter,   setNameFilter]   = useState("");
+  const isAdmin    = role === "super" || role === "clan";
+  const [view,           setView]           = useState("health");
+  const [healthClan,     setHealthClan]     = useState(lockedClan || "All");
+  const [clan,           setClan]           = useState(lockedClan || "69R");
+  const [viewPlayer,     setViewPlayer]     = useState(null);
+  const [nameFilter,     setNameFilter]     = useState("");
+  const [tierDrilldown,  setTierDrilldown]  = useState(null); // { clan, tier }
   const [hiddenEvents, setHiddenEvents] = useState(new Set());
   const [sortBy,       setSortBy]       = useState("name");
   const [sortDir,      setSortDir]      = useState("asc");
@@ -2518,7 +2655,9 @@ const TrendsScreen = () => {
                     {tiers.length > 0 ? (
                       <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
                         {tiers.map(({ tier, count }) => (
-                          <div key={tier} style={{ display:"flex", flexDirection:"column", alignItems:"center", backgroundColor:tier.startsWith("T")?"#f5f3ff":"#f1f5f9", borderRadius:8, padding:"6px 14px", minWidth:52 }}>
+                          <div key={tier} onClick={() => setTierDrilldown({ clan: c, tier })}
+                            style={{ display:"flex", flexDirection:"column", alignItems:"center", backgroundColor:tier.startsWith("T")?"#f5f3ff":"#f1f5f9", borderRadius:8, padding:"6px 14px", minWidth:52, cursor:"pointer", transition:"opacity 0.15s" }}
+                            onMouseEnter={e=>e.currentTarget.style.opacity="0.75"} onMouseLeave={e=>e.currentTarget.style.opacity="1"}>
                             <span style={{ fontFamily:"'DM Mono',monospace", fontWeight:800, fontSize:15, color:tier.startsWith("T")?"#7c3aed":"#475569" }}>{tier}</span>
                             <span style={{ fontSize:10, color:"#94a3b8", marginTop:1 }}>×{count}</span>
                           </div>
@@ -2573,6 +2712,17 @@ const TrendsScreen = () => {
           </>
         );
       })()}
+
+      {/* Tier drilldown sheet */}
+      {tierDrilldown && (
+        <TierDrilldownSheet
+          tier={tierDrilldown.tier}
+          clan={tierDrilldown.clan}
+          isAdmin={isAdmin}
+          onClose={() => setTierDrilldown(null)}
+          forceUpdate={forceUpdate}
+        />
+      )}
 
       {/* ── Score Grid view ── */}
       {view === "scores" && <>
