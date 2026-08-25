@@ -2,81 +2,62 @@
 // Paste ALL of this into your Apps Script editor, then re-deploy as a Web App
 // (new version — bump the deployment so the new code goes live).
 //
-// Storage layout — each score key gets its own cell (column A, rows 1-21):
-//   A1  → { players, lastBackup }
-//   A2  → { levelRequests, rotationLog, fragmentDistributions }
-//   A3  → { scores: { 69R_weekly_chests } }
-//   A4  → { scores: { 69R_tin_man } }
-//   A5  → { scores: { 69R_ragnarok } }
-//   A6  → { scores: { 69R_armageddon } }  ← RETIRED (data kept, not read/written)
-//   A7  → { scores: { 69R_omens } }
-//   A8  → { scores: { 69R_olympus } }
-//   A9  → { scores: { 69S_weekly_chests } }
-//   A10 → { scores: { 69S_tin_man } }
-//   A11 → { scores: { 69S_ragnarok } }
-//   A12 → { scores: { 69S_armageddon } }  ← RETIRED (data kept, not read/written)
-//   A13 → { scores: { 69S_omens } }
-//   A14 → { scores: { 69S_olympus } }
-//   A15 → { scores: { 69D_weekly_chests } }
-//   A16 → { scores: { 69D_tin_man } }
-//   A17 → { scores: { 69D_ragnarok } }
-//   A18 → { scores: { 69D_armageddon } }  ← RETIRED (data kept, not read/written)
-//   A19 → { scores: { 69D_omens } }
-//   A20 → { scores: { 69D_olympus } }
-//   A21 → { pins: { super, 69R, 69S, 69D, user } }
-//   A22 → { scores: { 69R_epic_chests } }
-//   A24 → { ctSync: { 69R: {...}, 69S: {...} }, ctAliases: { 69R: {...}, 69S: {...} } }
-//   A26 → { scores: { 69S_epic_chests } }
-//   A25 → { "69R": { "epic_chests": { "T9": 500, "G9": 400 }, ... }, ... }  ← performance norms
+// STORAGE LAYOUT — one Google Sheet tab per entity:
 //
-// Each cell stays well under Google's 50,000 char limit.
-// Entries are pruned per-event — limits are set below based on 130-player clan sizes.
+//   Players             → id | name | clan | active | hero | level | might | G | M | S | E
+//   LevelRequests       → id | playerId | playerName | clan | levelType | from | to | status | date | resolvedDate
+//   RotationLog         → id | playerId | playerName | fromClan | toClan | date
+//   FragmentDistributions → id | clan | eventId | date | scoreEntryDate | totalFragments | config | allocations
+//   Config              → key | value   (pins, norms, ctSync, ctAliases, ctIgnored, lastBackup)
+//
+//   Score tabs — one row per player per entry (clan stamped at time of entry):
+//   WeeklyChests        → weekStart | entryDate | syncedAt | clan | playerId | points
+//   TinMan              → weekStart | entryDate | syncedAt | clan | playerId | points
+//   Ragnarok            → weekStart | entryDate | syncedAt | clan | playerId | points
+//   Omens               → weekStart | entryDate | syncedAt | clan | playerId | essence | damage | chests
+//   Olympus             → weekStart | entryDate | syncedAt | clan | playerId | score | chests
+//   EpicChests          → weekStart | entryDate | syncedAt | clan | playerId | score
+//
+// The frontend JSON protocol is UNCHANGED — the app sends and receives the same
+// data shape as before. Only the backend storage format has changed.
+//
+// FIRST-TIME SETUP AFTER DEPLOYING:
+//   1. Run migrateToTabs() once from the Apps Script editor to move your
+//      existing cell data into the new tabs.
+//   2. Re-deploy the Web App (New version).
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SHEET_NAME = "AppData";
-
-// Per-event history limits — derived from cell-size analysis at 130 players per clan.
-// single-field events: 12 entries ≈ 44K chars (safe)
-// two/three-field events: 5 entries ≈ 37K chars (safe)
-// Raising these above these values risks silently exceeding the 50K cell limit.
-const MAX_HISTORY_BY_EVENT = {
-  "weekly_chests": 12,
-  "tin_man":       12,
-  "ragnarok":      12,
-  "omens":          5,
-  "olympus":        5,
-  "epic_chests":    3,   // auto-synced from ChestTracker; keep last 3 weekly syncs
+// ── Tab name constants ────────────────────────────────────────────────────────
+var TAB = {
+  PLAYERS:               "Players",
+  LEVEL_REQUESTS:        "LevelRequests",
+  ROTATION_LOG:          "RotationLog",
+  FRAGMENT_DISTRIBUTIONS:"FragmentDistributions",
+  CONFIG:                "Config",
+  WEEKLY_CHESTS:         "WeeklyChests",
+  TIN_MAN:               "TinMan",
+  RAGNAROK:              "Ragnarok",
+  OMENS:                 "Omens",
+  OLYMPUS:               "Olympus",
+  EPIC_CHESTS:           "EpicChests",
 };
 
-// Fixed mapping: score key → row number in column A
-const SCORE_ROW_MAP = {
-  "69R_weekly_chests":  3,
-  "69R_tin_man":        4,
-  "69R_ragnarok":       5,
-  // "69R_armageddon":     6,  // retired — data preserved in sheet row 6, not read or written
-  "69R_omens":          7,
-  "69R_olympus":        8,
-  "69S_weekly_chests":  9,
-  "69S_tin_man":        10,
-  "69S_ragnarok":       11,
-  // "69S_armageddon":     12,  // retired — data preserved in sheet row 12, not read or written
-  "69S_omens":          13,
-  "69S_olympus":        14,
-  "69D_weekly_chests":  15,
-  "69D_tin_man":        16,
-  "69D_ragnarok":       17,
-  // "69D_armageddon":     18,  // retired — data preserved in sheet row 18, not read or written
-  "69D_omens":          19,
-  "69D_olympus":        20,
-  "69R_epic_chests":    22,  // auto-synced from ChestTracker API
-  "69S_epic_chests":    26,  // auto-synced from ChestTracker API (same account)
+// Maps score event id (as used in frontend) → tab name and column definitions
+// fields: ordered list of score-specific column keys for this event
+var SCORE_EVENTS = {
+  "weekly_chests": { tab: TAB.WEEKLY_CHESTS, fields: ["points"] },
+  "tin_man":       { tab: TAB.TIN_MAN,       fields: ["points"] },
+  "ragnarok":      { tab: TAB.RAGNAROK,       fields: ["points"] },
+  "omens":         { tab: TAB.OMENS,          fields: ["essence","damage","chests"] },
+  "olympus":       { tab: TAB.OLYMPUS,        fields: ["score","chests"] },
+  "epic_chests":   { tab: TAB.EPIC_CHESTS,    fields: ["score"] },
 };
-const SCORE_KEYS = Object.keys(SCORE_ROW_MAP);
 
-// Default PINs — used when A21 is empty (first-run or restored from old backup).
-// These are the source of truth for initial PIN values.
-// Once an admin changes a PIN via the app, the new value is stored in A21 and takes over.
-const DEFAULT_PINS = {
+// Clans that have score data
+var CLANS = ["69R", "69S", "69D"];
+
+// Default PINs — used on first run before any admin changes them.
+var DEFAULT_PINS = {
   super: "9999",
   "69R": "6969",
   "69S": "6996",
@@ -84,390 +65,48 @@ const DEFAULT_PINS = {
   user:  "1111",
 };
 
-const EMPTY_DATA = {
+var EMPTY_DATA = {
   players: [], scores: {}, levelRequests: [], rotationLog: [],
   fragmentDistributions: [], lastBackup: null, pins: DEFAULT_PINS,
-  ctSync: {}, ctAliases: {}, ctIgnored: {},
+  ctSync: {}, ctAliases: {}, ctIgnored: {}, norms: {},
 };
 
-// ── Prune a single event's entries to the per-event limit ────────────────────
-// eventId: e.g. "omens", "weekly_chests" — used to look up the right limit.
-// Handles both the current ARRAY format and the legacy date-keyed OBJECT format.
-function pruneEventDates(eventData, eventId) {
-  var limit = MAX_HISTORY_BY_EVENT[eventId] || 12;
-
-  if (Array.isArray(eventData)) {
-    // Current format: array of { date, scores } objects
-    if (eventData.length <= limit) return eventData;
-    // Sort newest first (ISO date strings sort correctly as strings), keep most recent
-    return eventData.slice().sort(function(a, b) {
-      return a.date < b.date ? 1 : a.date > b.date ? -1 : 0;
-    }).slice(0, limit);
-  }
-
-  // Legacy format: date-keyed object { "2026-01-01": { pid: { points: ... } }, ... }
-  if (!eventData || typeof eventData !== "object") return eventData;
-  var dates = Object.keys(eventData).sort(); // ascending — oldest first
-  if (dates.length <= limit) return eventData;
-  var pruned = {};
-  dates.slice(dates.length - limit).forEach(function(d) {
-    pruned[d] = eventData[d];
-  });
-  return pruned;
+// ── Utility ───────────────────────────────────────────────────────────────────
+function safeParse(raw, fallback) {
+  if (raw === null || raw === undefined || raw === "") return (fallback !== undefined ? fallback : null);
+  if (typeof raw !== "string") return raw; // already parsed
+  try { return JSON.parse(raw); } catch(_) { return (fallback !== undefined ? fallback : null); }
 }
 
-// ── Read all data ─────────────────────────────────────────────────────────────
-function doGet(e) {
-  try {
-    var action = e && e.parameter && e.parameter.action;
-
-    if (action === "syncEpicChests") {
-      return jsonResponse(syncEpicChests());
-    }
-
-    // Save PINs via GET so the app can verify the write succeeded (no-cors POST is unverifiable).
-    if (action === "savePins") {
-      var pinsStr = e.parameter.pins;
-      if (!pinsStr) return jsonResponse({ error: "No pins data provided" });
-      var pinsData = JSON.parse(pinsStr);
-      var sheet = getSheet();
-      sheet.getRange("A21").setValue(JSON.stringify({ pins: pinsData }));
-      Logger.log("savePins: wrote to A21 — " + JSON.stringify(pinsData));
-      return jsonResponse({ ok: true });
-    }
-
-    // Save performance norms via GET (same verifiable pattern as savePins).
-    if (action === "saveNorms") {
-      var normsStr = e.parameter.norms;
-      if (!normsStr) return jsonResponse({ error: "No norms data provided" });
-      var normsData = JSON.parse(normsStr);
-      var sheet = getSheet();
-      sheet.getRange("A25").setValue(JSON.stringify(normsData));
-      Logger.log("saveNorms: wrote to A25");
-      return jsonResponse({ ok: true });
-    }
-
-    // Save a CT name → player ID alias for a given clan.
-    // Also removes the name from ctIgnored if it was there.
-    if (action === "saveAlias") {
-      var clan    = e.parameter.clan;
-      var ctName  = e.parameter.ctName;
-      var pid     = e.parameter.playerId;
-      if (!clan || !ctName || !pid) return jsonResponse({ error: "Missing clan, ctName, or playerId" });
-      var sheet   = getSheet();
-      var raw24   = sheet.getRange("A24").getValue();
-      var a24     = raw24 ? JSON.parse(raw24) : {};
-      if (!a24.ctAliases)      a24.ctAliases = {};
-      if (!a24.ctAliases[clan]) a24.ctAliases[clan] = {};
-      a24.ctAliases[clan][ctName] = pid;
-      // Remove from ignored if present
-      if (a24.ctIgnored && a24.ctIgnored[clan]) {
-        a24.ctIgnored[clan] = (a24.ctIgnored[clan] || []).filter(function(n) { return n !== ctName; });
-      }
-      sheet.getRange("A24").setValue(JSON.stringify(a24));
-      Logger.log("saveAlias: " + clan + " [" + ctName + "] → " + pid);
-      return jsonResponse({ ok: true });
-    }
-
-    // Remove a saved CT alias for a clan (so it goes back to unmatched on next sync).
-    if (action === "removeAlias") {
-      var clan   = e.parameter.clan;
-      var ctName = e.parameter.ctName;
-      if (!clan || !ctName) return jsonResponse({ error: "Missing clan or ctName" });
-      var sheet  = getSheet();
-      var raw24  = sheet.getRange("A24").getValue();
-      var a24    = raw24 ? JSON.parse(raw24) : {};
-      if (a24.ctAliases && a24.ctAliases[clan]) {
-        delete a24.ctAliases[clan][ctName];
-      }
-      sheet.getRange("A24").setValue(JSON.stringify(a24));
-      Logger.log("removeAlias: " + clan + " [" + ctName + "]");
-      return jsonResponse({ ok: true });
-    }
-
-    // Add or remove a CT name from the ignore list for a given clan.
-    // Pass remove=1 to un-ignore a name.
-    if (action === "saveIgnored") {
-      var clan   = e.parameter.clan;
-      var ctName = e.parameter.ctName;
-      var remove = e.parameter.remove === "1";
-      if (!clan || !ctName) return jsonResponse({ error: "Missing clan or ctName" });
-      var sheet  = getSheet();
-      var raw24  = sheet.getRange("A24").getValue();
-      var a24    = raw24 ? JSON.parse(raw24) : {};
-      if (!a24.ctIgnored)       a24.ctIgnored = {};
-      if (!a24.ctIgnored[clan]) a24.ctIgnored[clan] = [];
-      if (remove) {
-        a24.ctIgnored[clan] = a24.ctIgnored[clan].filter(function(n) { return n !== ctName; });
-        Logger.log("saveIgnored: un-ignored " + clan + " [" + ctName + "]");
-      } else {
-        if (a24.ctIgnored[clan].indexOf(ctName) === -1) a24.ctIgnored[clan].push(ctName);
-        // Remove any alias for this name when ignoring
-        if (a24.ctAliases && a24.ctAliases[clan]) {
-          delete a24.ctAliases[clan][ctName];
-        }
-        Logger.log("saveIgnored: ignored " + clan + " [" + ctName + "]");
-      }
-      sheet.getRange("A24").setValue(JSON.stringify(a24));
-      return jsonResponse({ ok: true });
-    }
-
-    return jsonResponse(readData());
-  }
-  catch (err) { return jsonResponse({ error: err.message }); }
-}
-
-// ── Write all data ────────────────────────────────────────────────────────────
-function doPost(e) {
-  try {
-    const incoming = JSON.parse(e.postData.contents);
-    if (incoming.action === "syncEpicChests") {
-      return jsonResponse(syncEpicChests());
-    }
-    // Safety: if the payload has an unrecognised 'action' field and no data fields,
-    // reject it rather than passing it to writeData (which would wipe the sheet).
-    if (incoming.action) {
-      return jsonResponse({ error: "Unknown action: " + incoming.action });
-    }
-    writeData(incoming);
-    return jsonResponse({ ok: true });
-  } catch (err) { return jsonResponse({ error: err.message }); }
-}
-
-// ── Sheet helper ──────────────────────────────────────────────────────────────
-function getSheet() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheet = ss.getSheetByName(SHEET_NAME);
+function getOrCreateTab(ss, name, headers) {
+  var sheet = ss.getSheetByName(name);
   if (!sheet) {
-    sheet = ss.insertSheet(SHEET_NAME);
-    sheet.getRange("A1").setValue(JSON.stringify({ players: [], lastBackup: null }));
-    sheet.getRange("A2").setValue(JSON.stringify({ levelRequests: [], rotationLog: [], fragmentDistributions: [] }));
-    SCORE_KEYS.forEach(function(key) {
-      var row = SCORE_ROW_MAP[key];
-      sheet.getRange("A" + row).setValue(JSON.stringify({ scores: {} }));
-    });
-    sheet.getRange("A21").setValue(JSON.stringify({ pins: DEFAULT_PINS }));
-    sheet.getRange("A24").setValue(JSON.stringify({ ctSync: {}, ctAliases: {}, ctIgnored: {} }));
-    sheet.getRange("A25").setValue(JSON.stringify({}));
-    sheet.getRange("A26").setValue(JSON.stringify({ scores: {} }));
+    sheet = ss.insertSheet(name);
+    if (headers && headers.length) {
+      sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    }
   }
   return sheet;
 }
 
-// ── Read ──────────────────────────────────────────────────────────────────────
-function readData() {
-  var sheet = getSheet();
-  var rawA1 = sheet.getRange("A1").getValue();
-  var rawA2 = sheet.getRange("A2").getValue();
-
-  if (!rawA1) return EMPTY_DATA;
-
-  var parse = function(raw) {
-    try { return raw ? JSON.parse(raw) : {}; } catch(_) { return {}; }
-  };
-
-  var dataA1 = parse(rawA1);
-
-  // ── Detect legacy format (old row-1 layout: A1/B1/C1...) ──────────────────
-  var rawB1 = sheet.getRange("B1").getValue();
-  if (rawB1 && rawB1.length > 20) {
-    return migrateLegacy(sheet);
-  }
-
-  var dataA2 = parse(rawA2);
-
-  // ── Read players — may be split across A1 + A23 if >50K chars ────────────
-  var players = dataA1.players || [];
-  var rawA23  = sheet.getRange("A23").getValue();
-  if (rawA23) {
-    var dataA23 = parse(rawA23);
-    if (dataA23.players) players = players.concat(dataA23.players);
-  }
-
-  // Read all score rows
-  var scores = {};
-  SCORE_KEYS.forEach(function(key) {
-    var row  = SCORE_ROW_MAP[key];
-    var raw  = sheet.getRange("A" + row).getValue();
-    var d    = parse(raw);
-    if (d.scores && d.scores[key]) {
-      scores[key] = d.scores[key];
-    }
-  });
-
-  var rawA21 = sheet.getRange("A21").getValue();
-  var dataA21 = parse(rawA21);
-  var rawA24 = sheet.getRange("A24").getValue();
-  var dataA24 = parse(rawA24);
-  var rawA25 = sheet.getRange("A25").getValue();
-  var normsData = rawA25 ? parse(rawA25) : {};
-
-  return {
-    players:               players,
-    lastBackup:            dataA1.lastBackup             || null,
-    scores:                scores,
-    levelRequests:         dataA2.levelRequests          || [],
-    rotationLog:           dataA2.rotationLog            || [],
-    fragmentDistributions: dataA2.fragmentDistributions  || [],
-    pins:                  dataA21.pins                  || DEFAULT_PINS,
-    ctSync:                dataA24.ctSync                || {},
-    ctAliases:             dataA24.ctAliases             || {},
-    ctIgnored:             dataA24.ctIgnored             || {},
-    norms:                 normsData,
-  };
+// Read all data rows from a sheet (skips header row 1), returns array of arrays.
+function readRows(sheet) {
+  var last = sheet.getLastRow();
+  if (last < 2) return [];
+  return sheet.getRange(2, 1, last - 1, sheet.getLastColumn()).getValues();
 }
 
-// ── Write ─────────────────────────────────────────────────────────────────────
-function writeData(data) {
-  // Safety guard: if the object looks like an action request (has .action but no
-  // recognised data fields), refuse to write rather than silently wipe the sheet.
-  if (!data || (data.action && !data.players && !data.scores && !data.levelRequests && !data.pins && !data.ctSync)) {
-    throw new Error("writeData: invalid payload — missing required data fields. Keys: " + JSON.stringify(Object.keys(data || {})));
-  }
-
-  var sheet = getSheet();
-
-  // ── PIN-only save: just update A21, leave everything else untouched ──────────
-  if (data.pins && !data.players && !data.scores) {
-    sheet.getRange("A21").setValue(JSON.stringify({ pins: data.pins }));
-    return;
-  }
-
-  var scores = data.scores || {};
-
-  // ── Split players across A1 + A23 if needed to stay under 50K char limit ──
-  var allPlayers   = data.players || [];
-  var mid          = Math.ceil(allPlayers.length / 2);
-  var playersA1    = allPlayers.slice(0, mid);
-  var playersA23   = allPlayers.slice(mid);
-  var a1Json       = JSON.stringify({ players: playersA1, lastBackup: data.lastBackup || null });
-  // If first half alone fits, use it; otherwise split evenly
-  if (a1Json.length > 49000) {
-    // Re-split more aggressively
-    mid       = Math.floor(allPlayers.length / 3);
-    playersA1 = allPlayers.slice(0, mid);
-    playersA23 = allPlayers.slice(mid);
-    a1Json    = JSON.stringify({ players: playersA1, lastBackup: data.lastBackup || null });
-  }
-  sheet.getRange("A1").setValue(a1Json);
-  sheet.getRange("A23").setValue(playersA23.length > 0 ? JSON.stringify({ players: playersA23 }) : "");
-  sheet.getRange("A2").setValue(JSON.stringify({
-    levelRequests:         data.levelRequests         || [],
-    rotationLog:           data.rotationLog           || [],
-    fragmentDistributions: data.fragmentDistributions || [],
-  }));
-
-  // Write PINs to A21 (only if provided — null means no change)
-  if (data.pins) {
-    sheet.getRange("A21").setValue(JSON.stringify({ pins: data.pins }));
-  }
-
-  // Write ChestTracker sync metadata to A24
-  var existingA24Raw = sheet.getRange("A24").getValue();
-  var existingA24 = (function(raw) { try { return raw ? JSON.parse(raw) : {}; } catch(_) { return {}; } })(existingA24Raw);
-  sheet.getRange("A24").setValue(JSON.stringify({
-    ctSync:    data.ctSync    !== undefined ? data.ctSync    : (existingA24.ctSync    || {}),
-    ctAliases: data.ctAliases !== undefined ? data.ctAliases : (existingA24.ctAliases || {}),
-    ctIgnored: data.ctIgnored !== undefined ? data.ctIgnored : (existingA24.ctIgnored || {}),
-  }));
-
-  // Write each score key to its own cell, pruning old entries
-  SCORE_KEYS.forEach(function(key) {
-    var row     = SCORE_ROW_MAP[key];
-    var eventId = key.split("_").slice(1).join("_"); // "69R_weekly_chests" → "weekly_chests"
-    var eventData = pruneEventDates(scores[key] || [], eventId);
-    sheet.getRange("A" + row).setValue(JSON.stringify({ scores: { [key]: eventData } }));
-  });
+// Append rows to a sheet. rows = array of arrays.
+function appendRows(sheet, rows) {
+  if (!rows || !rows.length) return;
+  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
 }
 
-// ── Migrate from legacy row-1 layout (B1/C1/D1/E1/F1/G1/H1) ─────────────────
-function migrateLegacy(sheet) {
-  Logger.log("Detected legacy layout — migrating to column-A format...");
-
-  var parse = function(raw) {
-    try { return raw ? JSON.parse(raw) : {}; } catch(_) { return {}; }
-  };
-
-  // Gather all scores from old cells (B1, D1, E1, F1, G1, H1)
-  var scores = {};
-  ["B1","D1","E1","F1","G1","H1"].forEach(function(ref) {
-    var raw = sheet.getRange(ref).getValue();
-    var d   = parse(raw);
-    Object.keys(d.scores || {}).forEach(function(k) { scores[k] = d.scores[k]; });
-  });
-
-  var rawA1 = parse(sheet.getRange("A1").getValue());
-  var rawC1 = parse(sheet.getRange("C1").getValue());
-
-  // Write into new layout
-  sheet.getRange("A1").setValue(JSON.stringify({
-    players: rawA1.players || [], lastBackup: rawA1.lastBackup || null
-  }));
-  sheet.getRange("A2").setValue(JSON.stringify({
-    levelRequests:         rawC1.levelRequests         || [],
-    rotationLog:           rawC1.rotationLog           || [],
-    fragmentDistributions: rawC1.fragmentDistributions || [],
-  }));
-  SCORE_KEYS.forEach(function(key) {
-    var row     = SCORE_ROW_MAP[key];
-    var eventId = key.split("_").slice(1).join("_");
-    var eventData = pruneEventDates(scores[key] || [], eventId);
-    sheet.getRange("A" + row).setValue(JSON.stringify({ scores: { [key]: eventData } }));
-  });
-
-  // Clear old cells
-  ["B1","C1","D1","E1","F1","G1","H1"].forEach(function(ref) {
-    sheet.getRange(ref).clearContent();
-  });
-
-  Logger.log("Migration complete.");
-  return readData();
-}
-
-// ── Run once manually after deploying to migrate existing data ─────────────────
-// Select "redistributeScores" from the function dropdown and click Run.
-function redistributeScores() {
-  var sheet = getSheet();
-  var rawB1 = sheet.getRange("B1").getValue();
-
-  if (!rawB1 || rawB1.length < 20) {
-    Logger.log("No legacy data found in B1 — nothing to migrate.");
-    return;
-  }
-
-  migrateLegacy(sheet);
-
-  Logger.log("=== Results after migration ===");
-  SCORE_KEYS.forEach(function(key) {
-    var row = SCORE_ROW_MAP[key];
-    var raw = sheet.getRange("A" + row).getValue();
-    Logger.log("A" + row + " (" + key + "): " + (raw ? raw.length : 0) + " chars");
-  });
-}
-
-// ── Diagnostic ────────────────────────────────────────────────────────────────
-function diagnose() {
-  var sheet = getSheet();
-
-  var r1 = sheet.getRange("A1").getValue();
-  var r2 = sheet.getRange("A2").getValue();
-  Logger.log("=== A1 — players (" + (r1?r1.length:0) + " chars) ===");
-  try { var d = JSON.parse(r1); Logger.log("players: " + (d.players||[]).length); } catch(_){}
-  Logger.log("=== A2 — requests/log (" + (r2?r2.length:0) + " chars) ===");
-  try { var d = JSON.parse(r2); Logger.log("levelRequests: " + (d.levelRequests||[]).length); } catch(_){}
-
-  SCORE_KEYS.forEach(function(key) {
-    var row = SCORE_ROW_MAP[key];
-    var raw = sheet.getRange("A" + row).getValue();
-    var len = raw ? raw.length : 0;
-    var pct = Math.round(len / 500);
-    Logger.log("A" + row + " [" + key + "]: " + len + " chars (" + pct + "% of limit)" + (len > 40000 ? " ⚠️ NEARLY FULL" : ""));
-    try {
-      var d = JSON.parse(raw);
-      var entries = d.scores && d.scores[key] ? Object.keys(d.scores[key]).length : 0;
-      Logger.log("  → " + entries + " date entries");
-    } catch(_){}
-  });
+// Clear all data rows (keep header).
+function clearDataRows(sheet) {
+  var last = sheet.getLastRow();
+  if (last < 2) return;
+  sheet.getRange(2, 1, last - 1, sheet.getMaxColumns()).clearContent();
 }
 
 function jsonResponse(obj) {
@@ -476,20 +115,679 @@ function jsonResponse(obj) {
   return output;
 }
 
+// ── Tab headers ───────────────────────────────────────────────────────────────
+var HEADERS = {
+  PLAYERS:               ["id","name","clan","active","hero","level","might","G","M","S","E"],
+  LEVEL_REQUESTS:        ["id","playerId","playerName","clan","levelType","from","to","status","date","resolvedDate"],
+  ROTATION_LOG:          ["id","playerId","playerName","fromClan","toClan","date"],
+  FRAGMENT_DISTRIBUTIONS:["id","clan","eventId","date","scoreEntryDate","totalFragments","config","allocations"],
+  CONFIG:                ["key","value"],
+  WEEKLY_CHESTS:         ["weekStart","entryDate","syncedAt","clan","playerId","points"],
+  TIN_MAN:               ["weekStart","entryDate","syncedAt","clan","playerId","points"],
+  RAGNAROK:              ["weekStart","entryDate","syncedAt","clan","playerId","points"],
+  OMENS:                 ["weekStart","entryDate","syncedAt","clan","playerId","essence","damage","chests"],
+  OLYMPUS:               ["weekStart","entryDate","syncedAt","clan","playerId","score","chests"],
+  EPIC_CHESTS:           ["weekStart","entryDate","syncedAt","clan","playerId","score"],
+};
+
+// ── Initialise all tabs (idempotent) ──────────────────────────────────────────
+function initTabs(ss) {
+  Object.keys(TAB).forEach(function(k) {
+    getOrCreateTab(ss, TAB[k], HEADERS[k]);
+  });
+}
+
+// ── Config helpers ────────────────────────────────────────────────────────────
+function readConfig(ss) {
+  var sheet = getOrCreateTab(ss, TAB.CONFIG, HEADERS.CONFIG);
+  var rows  = readRows(sheet);
+  var cfg   = {};
+  rows.forEach(function(r) { if (r[0]) cfg[r[0]] = safeParse(r[1], r[1]); });
+  return cfg;
+}
+
+function writeConfigKey(ss, key, value) {
+  var sheet = getOrCreateTab(ss, TAB.CONFIG, HEADERS.CONFIG);
+  var rows  = readRows(sheet);
+  var found = false;
+  for (var i = 0; i < rows.length; i++) {
+    if (rows[i][0] === key) {
+      // Update in place — row index in sheet = i + 2 (1-indexed + header)
+      sheet.getRange(i + 2, 2).setValue(JSON.stringify(value));
+      found = true;
+      break;
+    }
+  }
+  if (!found) {
+    appendRows(sheet, [[key, JSON.stringify(value)]]);
+  }
+}
+
+function writeAllConfig(ss, cfg) {
+  Object.keys(cfg).forEach(function(k) { writeConfigKey(ss, k, cfg[k]); });
+}
+
+// ── Players ───────────────────────────────────────────────────────────────────
+var PLAYER_COLS = HEADERS.PLAYERS; // ["id","name","clan","active","hero","level","might","G","M","S","E"]
+
+function readPlayers(ss) {
+  var sheet = getOrCreateTab(ss, TAB.PLAYERS, PLAYER_COLS);
+  var rows  = readRows(sheet);
+  return rows.filter(function(r) { return r[0]; }).map(function(r) {
+    return {
+      id:     r[0],
+      name:   r[1],
+      clan:   r[2],
+      active: r[3] === true || r[3] === "TRUE" || r[3] === 1,
+      hero:   r[4] !== "" && r[4] !== null ? Number(r[4]) : null,
+      level:  r[5] !== "" && r[5] !== null ? Number(r[5]) : null,
+      might:  r[6] !== "" && r[6] !== null ? Number(r[6]) : null,
+      levels: { G: r[7] || null, M: r[8] || null, S: r[9] || null, E: r[10] || null },
+    };
+  });
+}
+
+function writePlayers(ss, players) {
+  var sheet = getOrCreateTab(ss, TAB.PLAYERS, PLAYER_COLS);
+  clearDataRows(sheet);
+  if (!players || !players.length) return;
+  var rows = players.map(function(p) {
+    var lv = p.levels || {};
+    return [
+      p.id   || "",
+      p.name || "",
+      p.clan || "",
+      p.active ? "TRUE" : "FALSE",
+      p.hero   !== null && p.hero   !== undefined ? p.hero   : "",
+      p.level  !== null && p.level  !== undefined ? p.level  : "",
+      p.might  !== null && p.might  !== undefined ? p.might  : "",
+      lv.G || "",
+      lv.M || "",
+      lv.S || "",
+      lv.E || "",
+    ];
+  });
+  appendRows(sheet, rows);
+}
+
+// ── Level Requests ────────────────────────────────────────────────────────────
+var LR_COLS = HEADERS.LEVEL_REQUESTS;
+
+function readLevelRequests(ss) {
+  var sheet = getOrCreateTab(ss, TAB.LEVEL_REQUESTS, LR_COLS);
+  var rows  = readRows(sheet);
+  return rows.filter(function(r) { return r[0]; }).map(function(r) {
+    return {
+      id:           r[0],
+      playerId:     r[1],
+      playerName:   r[2],
+      clan:         r[3],
+      levelType:    r[4],
+      from:         r[5],
+      to:           r[6],
+      status:       r[7],
+      date:         r[8],
+      resolvedDate: r[9] || null,
+    };
+  });
+}
+
+function writeLevelRequests(ss, requests) {
+  var sheet = getOrCreateTab(ss, TAB.LEVEL_REQUESTS, LR_COLS);
+  clearDataRows(sheet);
+  if (!requests || !requests.length) return;
+  var rows = requests.map(function(r) {
+    return [
+      r.id          || "",
+      r.playerId    || "",
+      r.playerName  || "",
+      r.clan        || "",
+      r.levelType   || "",
+      r.from        !== undefined ? r.from : "",
+      r.to          !== undefined ? r.to   : "",
+      r.status      || "",
+      r.date        || "",
+      r.resolvedDate || "",
+    ];
+  });
+  appendRows(sheet, rows);
+}
+
+// ── Rotation Log ──────────────────────────────────────────────────────────────
+var RL_COLS = HEADERS.ROTATION_LOG;
+
+function readRotationLog(ss) {
+  var sheet = getOrCreateTab(ss, TAB.ROTATION_LOG, RL_COLS);
+  var rows  = readRows(sheet);
+  return rows.filter(function(r) { return r[0]; }).map(function(r) {
+    return {
+      id:         r[0],
+      playerId:   r[1],
+      playerName: r[2],
+      fromClan:   r[3],
+      toClan:     r[4],
+      date:       r[5],
+    };
+  });
+}
+
+function writeRotationLog(ss, log) {
+  var sheet = getOrCreateTab(ss, TAB.ROTATION_LOG, RL_COLS);
+  clearDataRows(sheet);
+  if (!log || !log.length) return;
+  var rows = log.map(function(r) {
+    return [r.id||"", r.playerId||"", r.playerName||"", r.fromClan||"", r.toClan||"", r.date||""];
+  });
+  appendRows(sheet, rows);
+}
+
+// ── Fragment Distributions ────────────────────────────────────────────────────
+var FD_COLS = HEADERS.FRAGMENT_DISTRIBUTIONS;
+
+function readFragmentDistributions(ss) {
+  var sheet = getOrCreateTab(ss, TAB.FRAGMENT_DISTRIBUTIONS, FD_COLS);
+  var rows  = readRows(sheet);
+  return rows.filter(function(r) { return r[0]; }).map(function(r) {
+    return {
+      id:             r[0],
+      clan:           r[1],
+      eventId:        r[2],
+      date:           r[3],
+      scoreEntryDate: r[4],
+      totalFragments: r[5] !== "" ? Number(r[5]) : null,
+      config:         safeParse(r[6], {}),
+      allocations:    safeParse(r[7], []),
+    };
+  });
+}
+
+function writeFragmentDistributions(ss, dists) {
+  var sheet = getOrCreateTab(ss, TAB.FRAGMENT_DISTRIBUTIONS, FD_COLS);
+  clearDataRows(sheet);
+  if (!dists || !dists.length) return;
+  var rows = dists.map(function(d) {
+    return [
+      d.id             || "",
+      d.clan           || "",
+      d.eventId        || "",
+      d.date           || "",
+      d.scoreEntryDate || "",
+      d.totalFragments !== undefined ? d.totalFragments : "",
+      JSON.stringify(d.config      || {}),
+      JSON.stringify(d.allocations || []),
+    ];
+  });
+  appendRows(sheet, rows);
+}
+
+// ── Score tabs ────────────────────────────────────────────────────────────────
+// Scores are stored as one row per player per entry.
+// Each score entry in the frontend looks like:
+//   { date, weekStart, syncedAt, scores: { playerId: { field1: val, field2: val } } }
+// We flatten this into one row per player:
+//   weekStart | entryDate | syncedAt | clan | playerId | field1 | field2 ...
+
+function readScoreTab(ss, eventId) {
+  var cfg   = SCORE_EVENTS[eventId];
+  if (!cfg) return [];
+  var sheet = getOrCreateTab(ss, cfg.tab, HEADERS[cfg.tab.toUpperCase().replace(" ","_")] || buildScoreHeaders(cfg.fields));
+  var rows  = readRows(sheet);
+  if (!rows.length) return [];
+
+  // Group rows by weekStart+clan into entries
+  var entryMap = {}; // key: clan+"||"+weekStart → { date, weekStart, syncedAt, clan, scores:{} }
+  rows.forEach(function(r) {
+    var weekStart = r[0] ? String(r[0]).slice(0,10) : "";
+    var entryDate = r[1] ? String(r[1]) : "";
+    var syncedAt  = r[2] ? String(r[2]) : "";
+    var clan      = r[3] ? String(r[3]) : "";
+    var playerId  = r[4] ? String(r[4]) : "";
+    if (!weekStart || !clan || !playerId) return;
+
+    var key = clan + "||" + weekStart;
+    if (!entryMap[key]) {
+      entryMap[key] = {
+        date:      entryDate || (weekStart + "T00:00:00.000Z"),
+        weekStart: weekStart,
+        syncedAt:  syncedAt,
+        clan:      clan,
+        scores:    {},
+      };
+    }
+    // Build per-player score object from field columns (index 5+)
+    var scoreObj = {};
+    cfg.fields.forEach(function(f, fi) {
+      var val = r[5 + fi];
+      scoreObj[f] = val !== "" && val !== null && val !== undefined ? Number(val) : 0;
+    });
+    entryMap[key].scores[playerId] = scoreObj;
+  });
+
+  // Return as frontend expects: { "69R_weekly_chests": [...entries] }
+  // Group by clan, sort newest first
+  var result = {}; // clanKey → entries array
+  Object.keys(entryMap).forEach(function(k) {
+    var entry = entryMap[k];
+    var scoreKey = entry.clan + "_" + eventId;
+    if (!result[scoreKey]) result[scoreKey] = [];
+    result[scoreKey].push(entry);
+  });
+  // Sort each clan's entries newest first
+  Object.keys(result).forEach(function(k) {
+    result[k].sort(function(a, b) { return a.weekStart < b.weekStart ? 1 : -1; });
+  });
+  return result; // { "69R_weekly_chests": [...], "69S_weekly_chests": [...] }
+}
+
+function writeScoreTab(ss, eventId, scoresByKey) {
+  // scoresByKey: { "69R_weekly_chests": [{date, weekStart, syncedAt, scores:{pid:{field:val}}}], ... }
+  var cfg   = SCORE_EVENTS[eventId];
+  if (!cfg) return;
+  var tabName = cfg.tab;
+  var headerKey = tabName.replace(/([A-Z])/g, function(m,l,i) { return (i>0?"_":"")+l; }).toUpperCase();
+  var headers = HEADERS[tabName.toUpperCase()] || HEADERS[headerKey] || buildScoreHeaders(cfg.fields);
+  var sheet   = getOrCreateTab(ss, tabName, headers);
+  clearDataRows(sheet);
+
+  var newRows = [];
+  CLANS.forEach(function(clan) {
+    var scoreKey = clan + "_" + eventId;
+    var entries  = scoresByKey[scoreKey] || [];
+    entries.forEach(function(entry) {
+      var weekStart = entry.weekStart || (entry.date || "").slice(0,10);
+      var entryDate = entry.date      || weekStart + "T00:00:00.000Z";
+      var syncedAt  = entry.syncedAt  || "";
+      var scores    = entry.scores    || {};
+      Object.keys(scores).forEach(function(pid) {
+        var s = scores[pid] || {};
+        var row = [weekStart, entryDate, syncedAt, clan, pid];
+        cfg.fields.forEach(function(f) {
+          row.push(s[f] !== undefined && s[f] !== null ? s[f] : 0);
+        });
+        newRows.push(row);
+      });
+    });
+  });
+
+  if (newRows.length) appendRows(sheet, newRows);
+}
+
+// Fallback header builder (in case tab name doesn't map cleanly)
+function buildScoreHeaders(fields) {
+  return ["weekStart","entryDate","syncedAt","clan","playerId"].concat(fields);
+}
+
+// HEADERS lookup by tab name (handles camelCase tab names)
+function getHeadersForTab(tabName) {
+  var map = {
+    "WeeklyChests": HEADERS.WEEKLY_CHESTS,
+    "TinMan":       HEADERS.TIN_MAN,
+    "Ragnarok":     HEADERS.RAGNAROK,
+    "Omens":        HEADERS.OMENS,
+    "Olympus":      HEADERS.OLYMPUS,
+    "EpicChests":   HEADERS.EPIC_CHESTS,
+  };
+  return map[tabName] || null;
+}
+
+// ── doGet ─────────────────────────────────────────────────────────────────────
+function doGet(e) {
+  try {
+    var action = e && e.parameter && e.parameter.action;
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    if (action === "syncEpicChests") {
+      return jsonResponse(syncEpicChests());
+    }
+
+    if (action === "savePins") {
+      var pinsStr = e.parameter.pins;
+      if (!pinsStr) return jsonResponse({ error: "No pins data provided" });
+      writeConfigKey(ss, "pins", JSON.parse(pinsStr));
+      Logger.log("savePins: updated Config tab");
+      return jsonResponse({ ok: true });
+    }
+
+    if (action === "saveNorms") {
+      var normsStr = e.parameter.norms;
+      if (!normsStr) return jsonResponse({ error: "No norms data provided" });
+      writeConfigKey(ss, "norms", JSON.parse(normsStr));
+      Logger.log("saveNorms: updated Config tab");
+      return jsonResponse({ ok: true });
+    }
+
+    if (action === "saveAlias") {
+      var clan   = e.parameter.clan;
+      var ctName = e.parameter.ctName;
+      var pid    = e.parameter.playerId;
+      if (!clan || !ctName || !pid) return jsonResponse({ error: "Missing clan, ctName, or playerId" });
+      var cfg     = readConfig(ss);
+      var aliases = cfg.ctAliases || {};
+      if (!aliases[clan]) aliases[clan] = {};
+      aliases[clan][ctName] = pid;
+      // Remove from ignored if present
+      var ignored = cfg.ctIgnored || {};
+      if (ignored[clan]) ignored[clan] = (ignored[clan] || []).filter(function(n) { return n !== ctName; });
+      writeConfigKey(ss, "ctAliases", aliases);
+      writeConfigKey(ss, "ctIgnored", ignored);
+      Logger.log("saveAlias: " + clan + " [" + ctName + "] → " + pid);
+      return jsonResponse({ ok: true });
+    }
+
+    if (action === "removeAlias") {
+      var clan   = e.parameter.clan;
+      var ctName = e.parameter.ctName;
+      if (!clan || !ctName) return jsonResponse({ error: "Missing clan or ctName" });
+      var cfg     = readConfig(ss);
+      var aliases = cfg.ctAliases || {};
+      if (aliases[clan]) delete aliases[clan][ctName];
+      writeConfigKey(ss, "ctAliases", aliases);
+      Logger.log("removeAlias: " + clan + " [" + ctName + "]");
+      return jsonResponse({ ok: true });
+    }
+
+    if (action === "saveIgnored") {
+      var clan   = e.parameter.clan;
+      var ctName = e.parameter.ctName;
+      var remove = e.parameter.remove === "1";
+      if (!clan || !ctName) return jsonResponse({ error: "Missing clan or ctName" });
+      var cfg     = readConfig(ss);
+      var ignored = cfg.ctIgnored || {};
+      var aliases = cfg.ctAliases || {};
+      if (!ignored[clan]) ignored[clan] = [];
+      if (remove) {
+        ignored[clan] = ignored[clan].filter(function(n) { return n !== ctName; });
+        Logger.log("saveIgnored: un-ignored " + clan + " [" + ctName + "]");
+      } else {
+        if (ignored[clan].indexOf(ctName) === -1) ignored[clan].push(ctName);
+        if (aliases[clan]) delete aliases[clan][ctName];
+        Logger.log("saveIgnored: ignored " + clan + " [" + ctName + "]");
+      }
+      writeConfigKey(ss, "ctIgnored", ignored);
+      writeConfigKey(ss, "ctAliases", aliases);
+      return jsonResponse({ ok: true });
+    }
+
+    return jsonResponse(readData(ss));
+  }
+  catch (err) { return jsonResponse({ error: err.message }); }
+}
+
+// ── doPost ────────────────────────────────────────────────────────────────────
+function doPost(e) {
+  try {
+    var incoming = JSON.parse(e.postData.contents);
+    if (incoming.action === "syncEpicChests") {
+      return jsonResponse(syncEpicChests());
+    }
+    if (incoming.action) {
+      return jsonResponse({ error: "Unknown action: " + incoming.action });
+    }
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    writeData(ss, incoming);
+    return jsonResponse({ ok: true });
+  } catch (err) { return jsonResponse({ error: err.message }); }
+}
+
+// ── readData ──────────────────────────────────────────────────────────────────
+function readData(ss) {
+  if (!ss) ss = SpreadsheetApp.getActiveSpreadsheet();
+  initTabs(ss);
+
+  var players              = readPlayers(ss);
+  var levelRequests        = readLevelRequests(ss);
+  var rotationLog          = readRotationLog(ss);
+  var fragmentDistributions = readFragmentDistributions(ss);
+  var cfg                  = readConfig(ss);
+
+  // Merge all score events into one scores object
+  var scores = {};
+  Object.keys(SCORE_EVENTS).forEach(function(eventId) {
+    var eventScores = readScoreTab(ss, eventId); // { "69R_weekly_chests": [...], ... }
+    Object.keys(eventScores).forEach(function(k) { scores[k] = eventScores[k]; });
+  });
+
+  return {
+    players:               players,
+    scores:                scores,
+    levelRequests:         levelRequests,
+    rotationLog:           rotationLog,
+    fragmentDistributions: fragmentDistributions,
+    lastBackup:            cfg.lastBackup  || null,
+    pins:                  cfg.pins        || DEFAULT_PINS,
+    ctSync:                cfg.ctSync      || {},
+    ctAliases:             cfg.ctAliases   || {},
+    ctIgnored:             cfg.ctIgnored   || {},
+    norms:                 cfg.norms       || {},
+  };
+}
+
+// ── writeData ─────────────────────────────────────────────────────────────────
+function writeData(ss, data) {
+  if (!ss) ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (!data || (data.action && !data.players && !data.scores && !data.levelRequests && !data.pins && !data.ctSync)) {
+    throw new Error("writeData: invalid payload — missing required data fields. Keys: " + JSON.stringify(Object.keys(data || {})));
+  }
+  initTabs(ss);
+
+  // PIN-only save
+  if (data.pins && !data.players && !data.scores) {
+    writeConfigKey(ss, "pins", data.pins);
+    return;
+  }
+
+  if (data.players !== undefined)              writePlayers(ss, data.players);
+  if (data.levelRequests !== undefined)        writeLevelRequests(ss, data.levelRequests);
+  if (data.rotationLog !== undefined)          writeRotationLog(ss, data.rotationLog);
+  if (data.fragmentDistributions !== undefined) writeFragmentDistributions(ss, data.fragmentDistributions);
+
+  // Config keys — only update keys present in the payload
+  if (data.pins        !== undefined) writeConfigKey(ss, "pins",       data.pins);
+  if (data.lastBackup  !== undefined) writeConfigKey(ss, "lastBackup", data.lastBackup);
+  if (data.norms       !== undefined) writeConfigKey(ss, "norms",      data.norms);
+
+  // CT metadata — read existing first so we don't wipe keys not in this payload
+  var existingCfg = readConfig(ss);
+  writeConfigKey(ss, "ctSync",    data.ctSync    !== undefined ? data.ctSync    : (existingCfg.ctSync    || {}));
+  writeConfigKey(ss, "ctAliases", data.ctAliases !== undefined ? data.ctAliases : (existingCfg.ctAliases || {}));
+  writeConfigKey(ss, "ctIgnored", data.ctIgnored !== undefined ? data.ctIgnored : (existingCfg.ctIgnored || {}));
+
+  // Scores — write each event's tab from the incoming scores object
+  if (data.scores !== undefined) {
+    Object.keys(SCORE_EVENTS).forEach(function(eventId) {
+      // Collect all score keys for this event across all clans
+      var relevant = {};
+      CLANS.forEach(function(clan) {
+        var k = clan + "_" + eventId;
+        if (data.scores[k] !== undefined) relevant[k] = data.scores[k];
+      });
+      // Only rewrite the tab if at least one clan's data is present in the payload
+      if (Object.keys(relevant).length > 0) {
+        // Merge with existing data for clans not in the payload
+        var existing = readScoreTab(ss, eventId);
+        var merged = {};
+        CLANS.forEach(function(clan) {
+          var k = clan + "_" + eventId;
+          merged[k] = relevant[k] !== undefined ? relevant[k] : (existing[k] || []);
+        });
+        writeScoreTab(ss, eventId, merged);
+      }
+    });
+  }
+}
+
+// ── Migration from old cell-based layout ──────────────────────────────────────
+// Run this ONCE from the Apps Script editor after deploying this new backend.
+// Reads ALL old data in one batch call, writes each tab in one setValues call.
+// Safe to run multiple times — it reads live data each time.
+function migrateToTabs() {
+  var ss       = SpreadsheetApp.getActiveSpreadsheet();
+  var oldSheet = ss.getSheetByName("AppData");
+
+  if (!oldSheet) {
+    Logger.log("migrateToTabs: No 'AppData' sheet found — nothing to migrate.");
+    return;
+  }
+
+  Logger.log("migrateToTabs: Reading AppData in one batch...");
+
+  // ── Read ALL of column A in one API call ──────────────────────────────────
+  var lastRow  = Math.max(oldSheet.getLastRow(), 30);
+  var rawCol   = oldSheet.getRange(1, 1, lastRow, 1).getValues(); // one API call
+  var parse    = function(v) { try { return v ? JSON.parse(v) : {}; } catch(_) { return {}; } };
+  var cell     = function(row) { return rawCol[row - 1] ? rawCol[row - 1][0] : ""; };
+
+  var dataA1  = parse(cell(1));
+  var dataA2  = parse(cell(2));
+  var dataA21 = parse(cell(21));
+  var dataA23 = parse(cell(23));
+  var dataA24 = parse(cell(24));
+  var normsData = cell(25) ? parse(cell(25)) : {};
+
+  var players = (dataA1.players || []).concat(dataA23.players || []);
+
+  var OLD_SCORE_ROW_MAP = {
+    "69R_weekly_chests": 3,  "69R_tin_man": 4,  "69R_ragnarok": 5,
+    "69R_omens": 7,          "69R_olympus": 8,
+    "69S_weekly_chests": 9,  "69S_tin_man": 10, "69S_ragnarok": 11,
+    "69S_omens": 13,         "69S_olympus": 14,
+    "69D_weekly_chests": 15, "69D_tin_man": 16, "69D_ragnarok": 17,
+    "69D_omens": 19,         "69D_olympus": 20,
+    "69R_epic_chests": 22,   "69S_epic_chests": 26,
+  };
+
+  var oldScores = {};
+  Object.keys(OLD_SCORE_ROW_MAP).forEach(function(key) {
+    var raw = cell(OLD_SCORE_ROW_MAP[key]);
+    if (raw) {
+      var d = parse(raw);
+      if (d.scores && d.scores[key]) oldScores[key] = d.scores[key];
+    }
+  });
+
+  Logger.log("migrateToTabs: " + players.length + " players | " +
+    (dataA2.levelRequests||[]).length + " LRs | " +
+    Object.keys(oldScores).length + " score keys");
+
+  // ── Helper: create tab + write all rows in ONE setValues call ─────────────
+  function writeTabBatch(tabName, headers, rows) {
+    var sheet = ss.getSheetByName(tabName);
+    if (!sheet) {
+      sheet = ss.insertSheet(tabName);
+    } else {
+      sheet.clearContents(); // wipe everything including any partial data from a previous failed run
+    }
+    // Always write headers to row 1
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    if (rows && rows.length) {
+      sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+    }
+    SpreadsheetApp.flush(); // commit after each tab — preserves progress on partial timeout
+    Logger.log("  ✓ " + tabName + " — " + (rows ? rows.length : 0) + " rows");
+  }
+
+  // ── Players ───────────────────────────────────────────────────────────────
+  var playerRows = players.map(function(p) {
+    var lv = p.levels || {};
+    return [p.id||"", p.name||"", p.clan||"", p.active?"TRUE":"FALSE",
+      p.hero  !==null&&p.hero  !==undefined ? p.hero   : "",
+      p.level !==null&&p.level !==undefined ? p.level  : "",
+      p.might !==null&&p.might !==undefined ? p.might  : "",
+      lv.G||"", lv.M||"", lv.S||"", lv.E||""];
+  });
+  writeTabBatch("Players", HEADERS.PLAYERS, playerRows);
+
+  // ── Level Requests ────────────────────────────────────────────────────────
+  var lrRows = (dataA2.levelRequests || []).map(function(r) {
+    return [r.id||"", r.playerId||"", r.playerName||"", r.clan||"",
+      r.levelType||"", r.from!==undefined?r.from:"", r.to!==undefined?r.to:"",
+      r.status||"", r.date||"", r.resolvedDate||""];
+  });
+  writeTabBatch("LevelRequests", HEADERS.LEVEL_REQUESTS, lrRows);
+
+  // ── Rotation Log ──────────────────────────────────────────────────────────
+  var rlRows = (dataA2.rotationLog || []).map(function(r) {
+    return [r.id||"", r.playerId||"", r.playerName||"", r.fromClan||"", r.toClan||"", r.date||""];
+  });
+  writeTabBatch("RotationLog", HEADERS.ROTATION_LOG, rlRows);
+
+  // ── Fragment Distributions ────────────────────────────────────────────────
+  var fdRows = (dataA2.fragmentDistributions || []).map(function(d) {
+    return [d.id||"", d.clan||"", d.eventId||"", d.date||"", d.scoreEntryDate||"",
+      d.totalFragments!==undefined?d.totalFragments:"",
+      JSON.stringify(d.config||{}), JSON.stringify(d.allocations||[])];
+  });
+  writeTabBatch("FragmentDistributions", HEADERS.FRAGMENT_DISTRIBUTIONS, fdRows);
+
+  // ── Config ────────────────────────────────────────────────────────────────
+  var cfgRows = [
+    ["pins",       JSON.stringify(dataA21.pins     || DEFAULT_PINS)],
+    ["norms",      JSON.stringify(normsData)],
+    ["ctSync",     JSON.stringify(dataA24.ctSync   || {})],
+    ["ctAliases",  JSON.stringify(dataA24.ctAliases|| {})],
+    ["ctIgnored",  JSON.stringify(dataA24.ctIgnored|| {})],
+    ["lastBackup", JSON.stringify(dataA1.lastBackup|| null)],
+  ];
+  writeTabBatch("Config", HEADERS.CONFIG, cfgRows);
+
+  // ── Score tabs ────────────────────────────────────────────────────────────
+  Object.keys(SCORE_EVENTS).forEach(function(eventId) {
+    var cfg     = SCORE_EVENTS[eventId];
+    var headers = getHeadersForTab(cfg.tab) || buildScoreHeaders(cfg.fields);
+    var newRows = [];
+
+    CLANS.forEach(function(clan) {
+      var entries = oldScores[clan + "_" + eventId] || [];
+      entries.forEach(function(entry) {
+        var weekStart = entry.weekStart || (entry.date||"").slice(0,10);
+        var entryDate = entry.date      || weekStart + "T00:00:00.000Z";
+        var syncedAt  = entry.syncedAt  || "";
+        Object.keys(entry.scores || {}).forEach(function(pid) {
+          var s   = entry.scores[pid] || {};
+          var row = [weekStart, entryDate, syncedAt, clan, pid];
+          cfg.fields.forEach(function(f) { row.push(s[f] !== undefined ? s[f] : 0); });
+          newRows.push(row);
+        });
+      });
+    });
+
+    writeTabBatch(cfg.tab, headers, newRows);
+  });
+
+  Logger.log("migrateToTabs: COMPLETE — all data written to tabs.");
+  Logger.log("Verify the tabs look correct, then re-deploy the Web App as a new version.");
+}
+
+// ── Diagnostics ───────────────────────────────────────────────────────────────
+function diagnose() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  Logger.log("=== Tab Diagnostics ===");
+  Object.keys(TAB).forEach(function(k) {
+    var sheet = ss.getSheetByName(TAB[k]);
+    if (!sheet) { Logger.log(TAB[k] + ": NOT FOUND"); return; }
+    var rows = sheet.getLastRow() - 1;
+    Logger.log(TAB[k] + ": " + (rows < 0 ? 0 : rows) + " data rows");
+  });
+  Logger.log("=== Config keys ===");
+  var cfg = readConfig(ss);
+  Object.keys(cfg).forEach(function(k) {
+    var v = cfg[k];
+    var summary = typeof v === "object" ? JSON.stringify(v).slice(0,80) : String(v).slice(0,80);
+    Logger.log(k + ": " + summary);
+  });
+}
+
 // ─── CHESTTRACKER API SYNC ────────────────────────────────────────────────────
 // To configure: go to Apps Script → Project Settings → Script Properties and add:
 //   CT_EMAIL    → your ChestTracker login email
 //   CT_PASSWORD → your ChestTracker login password
 //
-// To set up the Sunday 10pm trigger: run setupEpicChestsTrigger() once from
-// the Apps Script editor (select it from the function dropdown and click Run).
+// To set up the hourly trigger: run setupEpicChestsTrigger() once from
+// the Apps Script editor.
 // ─────────────────────────────────────────────────────────────────────────────
 
 var CT_API_BASE = "https://api.chesttracker.com/v1";
 
-// Authenticate and return a token.
-// Pass memberId to get a clan-scoped token (required for /chests/breakdown).
-// Without memberId, the token is only valid for listing endpoints (/clans, /members).
 function getCTToken(memberId) {
   var props    = PropertiesService.getScriptProperties();
   var email    = props.getProperty("CT_EMAIL");
@@ -497,21 +795,17 @@ function getCTToken(memberId) {
   if (!email || !password) {
     throw new Error("ChestTracker credentials not configured. Add CT_EMAIL and CT_PASSWORD in Script Properties.");
   }
-
   var body = { email: email, password: password };
   if (memberId) body.memberId = memberId;
-
   var resp = UrlFetchApp.fetch(CT_API_BASE + "/authenticate", {
     method: "post",
     contentType: "application/json",
     payload: JSON.stringify(body),
     muteHttpExceptions: true,
   });
-
   if (resp.getResponseCode() !== 200) {
     throw new Error("ChestTracker auth failed (" + resp.getResponseCode() + "): " + resp.getContentText());
   }
-
   var result = JSON.parse(resp.getContentText());
   var token = result.authToken || result.token || result.accessToken || result.access_token || result.jwt;
   if (!token) {
@@ -520,17 +814,13 @@ function getCTToken(memberId) {
   return token;
 }
 
-// Main sync function — called by hourly time trigger or manually.
-// Queries ChestTracker from the start of the current week (Sunday midnight UTC)
-// to now, so each run updates the same weekly entry rather than creating a new one.
-// On the first run of a new week the old entry is archived and a fresh one starts.
-// Syncs both 69R and 69S from the same CT account in a single API call.
 function syncEpicChests() {
   try {
+    var ss  = SpreadsheetApp.getActiveSpreadsheet();
     var now = new Date();
 
     // Week boundary: Sunday 18:00 UTC → following Sunday 17:59 UTC
-    var dayOfWeek = now.getUTCDay(); // 0 = Sunday
+    var dayOfWeek = now.getUTCDay();
     var daysBack  = dayOfWeek === 0 && now.getUTCHours() < 18 ? 7 : dayOfWeek;
     var startOfWeek = new Date(now);
     startOfWeek.setUTCDate(now.getUTCDate() - daysBack);
@@ -541,24 +831,21 @@ function syncEpicChests() {
                    + "&start=" + encodeURIComponent(startOfWeek.toISOString())
                    + "&end="   + encodeURIComponent(now.toISOString());
 
-    // Step 1: Base auth (no memberId) — only valid for listing endpoints.
+    // Base auth for listing endpoints
     var baseToken   = getCTToken();
     var baseHeaders = { "Authorization": "Bearer " + baseToken };
 
-    // Step 2: Get clan tag→id map from /clans.
+    // Get clan tag → id map
     var clansRaw  = JSON.parse(UrlFetchApp.fetch(CT_API_BASE + "/clans", { headers: baseHeaders, muteHttpExceptions: true }).getContentText());
     var clansList = Array.isArray(clansRaw[0]) ? clansRaw[0] : clansRaw;
     var tagToClanId = {};
     clansList.forEach(function(c) { if (c.tag && c.id) tagToClanId[c.tag] = c.id; });
 
-    // Step 3: Get the account's per-clan member IDs from /members.
-    // /members returns the CT account's own membership records (one per clan).
+    // Get account's per-clan member IDs
     var membersRaw   = JSON.parse(UrlFetchApp.fetch(CT_API_BASE + "/members", { headers: baseHeaders, muteHttpExceptions: true }).getContentText());
     var acctMembers  = Array.isArray(membersRaw[0]) ? membersRaw[0] : membersRaw;
-    // Build clanId → memberId (the account's membership ID in that clan)
     var clanIdToMemberId = {};
     acctMembers.forEach(function(m) { if (m.clanId && m.id) clanIdToMemberId[m.clanId] = m.id; });
-    // Derive tag → memberId
     var tagToMemberId = {};
     Object.keys(tagToClanId).forEach(function(tag) {
       var clanId = tagToClanId[tag];
@@ -566,10 +853,10 @@ function syncEpicChests() {
     });
     Logger.log("syncEpicChests: clans=" + JSON.stringify(tagToClanId) + " memberIds=" + JSON.stringify(tagToMemberId));
 
-    // Load current app data
-    var appData = readData();
-    if (!appData.scores) appData.scores = {};
-    if (!appData.ctSync) appData.ctSync = {};
+    // Read current data
+    var appData = readData(ss);
+    if (!appData.scores)  appData.scores  = {};
+    if (!appData.ctSync)  appData.ctSync  = {};
 
     var clansToSync = ["69R", "69S"];
     var results = {};
@@ -582,11 +869,9 @@ function syncEpicChests() {
         return;
       }
 
-      // Step 4: Per-clan auth — memberId scopes the token to this clan.
       var clanToken   = getCTToken(memberId);
       var clanHeaders = { "Authorization": "Bearer " + clanToken };
 
-      // Step 5: Fetch chest breakdown for this clan.
       var url  = CT_API_BASE + "/chests/breakdown" + timeParams;
       var resp = UrlFetchApp.fetch(url, { headers: clanHeaders, muteHttpExceptions: true });
       if (resp.getResponseCode() !== 200) {
@@ -599,29 +884,22 @@ function syncEpicChests() {
       var members = Array.isArray(parsed[0]) ? parsed[0] : parsed;
       Logger.log("syncEpicChests " + clan + ": CT returned " + members.length + " members");
 
-      var players  = (appData.players || []).filter(function(p) { return p.clan === clan && p.active; });
-      var aliases  = (appData.ctAliases || {})[clan] || {};   // { "CT Name": "playerId" }
-      var ignored  = (appData.ctIgnored || {})[clan] || [];   // ["CT Name", ...]
+      var players = (appData.players || []).filter(function(p) { return p.clan === clan && p.active; });
+      var aliases = (appData.ctAliases || {})[clan] || {};
+      var ignored = (appData.ctIgnored || {})[clan] || [];
 
-      // Build name → playerId lookup
       var nameLookup = {};
-      players.forEach(function(p) {
-        nameLookup[p.name.toLowerCase().trim()] = p.id;
-      });
+      players.forEach(function(p) { nameLookup[p.name.toLowerCase().trim()] = p.id; });
 
-      var matched   = {};  // playerId → epics count
-      var unmatched = [];  // { name, epics } — CT names not found in this clan
+      var matched   = {};
+      var unmatched = [];
 
       members.forEach(function(member) {
         var ctName = (member.name || "").trim();
         if (!ctName) return;
         if (ignored.indexOf(ctName) !== -1) return;
-
-        // Use only the "epic squad" chest type
         var epicSquad = member["epic squad"];
         var epics = (epicSquad && typeof epicSquad.chests === "number") ? epicSquad.chests : 0;
-
-        // Match: saved alias → name lookup → unmatched
         var playerId = aliases[ctName] || nameLookup[ctName.toLowerCase().trim()];
         if (playerId) {
           matched[playerId] = epics;
@@ -630,11 +908,9 @@ function syncEpicChests() {
         }
       });
 
-      // Build score entry — date is week start so player profiles show the Sunday date
+      // Build scores for this week's entry
       var scores = {};
-      Object.keys(matched).forEach(function(pid) {
-        scores[pid] = { score: matched[pid] };
-      });
+      Object.keys(matched).forEach(function(pid) { scores[pid] = { score: matched[pid] }; });
 
       var entry = {
         date:      weekStart + "T00:00:00.000Z",
@@ -643,20 +919,17 @@ function syncEpicChests() {
         scores:    scores,
       };
 
-      // Update or create this week's entry
       var key = clan + "_epic_chests";
       if (!appData.scores[key]) appData.scores[key] = [];
-
       var entries = appData.scores[key];
       if (entries.length > 0 && entries[0].weekStart === weekStart) {
-        entries[0] = entry;  // Same week — overwrite with refreshed scores
+        entries[0] = entry;
       } else {
-        entries.unshift(entry);  // New week — archive old and start fresh
+        entries.unshift(entry);
         if (entries.length > 3) entries = entries.slice(0, 3);
       }
       appData.scores[key] = entries;
 
-      // Update ctSync metadata for this clan
       appData.ctSync[clan] = {
         lastSync:  now.toISOString(),
         matched:   Object.keys(matched).length,
@@ -667,7 +940,7 @@ function syncEpicChests() {
       Logger.log("syncEpicChests " + clan + ": week=" + weekStart + " matched=" + Object.keys(matched).length + " unmatched=" + unmatched.length);
     });
 
-    writeData(appData);
+    writeData(ss, appData);
     return { success: true, "69R": results["69R"], "69S": results["69S"] };
 
   } catch (err) {
@@ -676,159 +949,10 @@ function syncEpicChests() {
   }
 }
 
-// ── DIAGNOSTIC — run this ONCE from the Apps Script editor ───────────────────
-// Probes the CT API to find the right endpoint/parameter for selecting a clan.
-function debugCtResponse() {
-  try {
-    var props    = PropertiesService.getScriptProperties();
-    var email    = props.getProperty("CT_EMAIL");
-    var password = props.getProperty("CT_PASSWORD");
-
-    // Step 1: Log full auth response — might contain group/clan IDs
-    Logger.log("=== AUTH RESPONSE ===");
-    var authResp = UrlFetchApp.fetch(CT_API_BASE + "/authenticate", {
-      method: "post",
-      headers: { "Content-Type": "application/json" },
-      payload: JSON.stringify({ email: email, password: password }),
-      muteHttpExceptions: true,
-    });
-    Logger.log("Auth status: " + authResp.getResponseCode());
-    Logger.log("Auth body: " + authResp.getContentText());
-
-    var authData = JSON.parse(authResp.getContentText());
-    var token    = authData.authToken || authData.token || authData.access_token || authData.accessToken || "";
-    if (!token) { Logger.log("No token found — check auth body above"); return; }
-    Logger.log("Token obtained: " + token.slice(0, 30) + "...");
-
-    var headers = { "Authorization": "Bearer " + token };
-
-    // Step 2: Try /groups or /clans or /me to find group IDs
-    Logger.log("=== PROBING ENDPOINTS ===");
-    var endpoints = ["/groups", "/clans", "/me", "/user", "/user/groups", "/account"];
-    endpoints.forEach(function(ep) {
-      try {
-        var r = UrlFetchApp.fetch(CT_API_BASE + ep, { headers: headers, muteHttpExceptions: true });
-        Logger.log(ep + " → " + r.getResponseCode() + ": " + r.getContentText().slice(0, 300));
-      } catch(e) { Logger.log(ep + " → ERROR: " + e.message); }
-    });
-
-    // Step 3: Get clan IDs from /clans
-    Logger.log("=== CLAN IDs ===");
-    var clansRaw  = JSON.parse(UrlFetchApp.fetch(CT_API_BASE + "/clans", { headers: headers, muteHttpExceptions: true }).getContentText());
-    var clansList = Array.isArray(clansRaw[0]) ? clansRaw[0] : clansRaw;
-    var tagToId = {};
-    clansList.forEach(function(c) { if (c.tag && c.id) tagToId[c.tag] = c.id; });
-    Logger.log("Clans: " + JSON.stringify(tagToId));
-    var id69S = tagToId["69S"] || "82ee1599-67c3-41c2-868f-e751541264e1";
-    var id69R = tagToId["69R"] || "97abb703-1122-43b4-a77c-2f5b21464c6d";
-
-    // Step 4: Try breakdown endpoint path variations
-    Logger.log("=== TRYING ENDPOINT PATH VARIATIONS ===");
-    var now   = new Date();
-    var start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    var timeQ = "levels=1&start=" + encodeURIComponent(start.toISOString()) + "&end=" + encodeURIComponent(now.toISOString());
-    var pathTests = [
-      "/clans/" + id69S + "/chests/breakdown?" + timeQ,
-      "/clans/" + id69S + "/breakdown?" + timeQ,
-      "/chests/breakdown?clanId=" + id69S + "&" + timeQ,
-      "/chests/breakdown?groupId=" + id69S + "&" + timeQ,
-      "/chests/breakdown?clan=" + id69S + "&" + timeQ,
-    ];
-    pathTests.forEach(function(path) {
-      try {
-        var r = UrlFetchApp.fetch(CT_API_BASE + path, { headers: headers, muteHttpExceptions: true });
-        var code = r.getResponseCode();
-        if (code === 200) {
-          var parsed = JSON.parse(r.getContentText());
-          var members = Array.isArray(parsed[0]) ? parsed[0] : parsed;
-          Logger.log(path.slice(0,60) + " → " + code + " members: " + members.length + " first: " + (members[0] && members[0].name));
-        } else {
-          Logger.log(path.slice(0,60) + " → " + code);
-        }
-      } catch(e) { Logger.log(path.slice(0,60) + " → ERROR: " + e.message); }
-    });
-
-    // Step 5: Get actual member IDs from /members (CT account memberships, not game players)
-    Logger.log("=== /members — GET ACCOUNT MEMBER IDs ===");
-    var membersResp = UrlFetchApp.fetch(CT_API_BASE + "/members", { headers: headers, muteHttpExceptions: true });
-    var membersRaw  = JSON.parse(membersResp.getContentText());
-    var acctMembers = Array.isArray(membersRaw[0]) ? membersRaw[0] : membersRaw;
-    Logger.log("Account members: " + JSON.stringify(acctMembers.map(function(m) { return { id: m.id, name: m.name, clanId: m.clanId }; })));
-
-    var memberId69R = null, memberId69S = null;
-    acctMembers.forEach(function(m) {
-      if (m.clanId === id69R) memberId69R = m.id;
-      if (m.clanId === id69S) memberId69S = m.id;
-    });
-    Logger.log("69R member ID: " + memberId69R);
-    Logger.log("69S member ID: " + memberId69S);
-
-    // Step 6: Auth with specific MEMBER IDs to get clan-scoped tokens
-    Logger.log("=== AUTH WITH MEMBER IDs ===");
-    function decodeJwtPayload(jwt) {
-      try {
-        var parts = jwt.split(".");
-        var payload = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-        while (payload.length % 4 !== 0) payload += "=";
-        return Utilities.newBlob(Utilities.base64Decode(payload)).getDataAsString();
-      } catch(e) { return "decode error: " + e.message; }
-    }
-
-    function tryAuth(label, body) {
-      var r = UrlFetchApp.fetch(CT_API_BASE + "/authenticate", {
-        method: "post",
-        headers: { "Content-Type": "application/json" },
-        payload: JSON.stringify(body),
-        muteHttpExceptions: true,
-      });
-      var d = JSON.parse(r.getContentText());
-      var tk = d.authToken || d.token || "";
-      if (!tk) { Logger.log(label + ": no token — " + r.getContentText().slice(0, 100)); return null; }
-      var decoded = JSON.parse(decodeJwtPayload(tk));
-      Logger.log(label + ": authorizedMember=" + JSON.stringify(decoded.authorizedMember) + " favoriteId=" + decoded.favoriteId);
-      // Test breakdown with this token
-      var br = UrlFetchApp.fetch(CT_API_BASE + "/chests/breakdown?" + timeQ, {
-        headers: { "Authorization": "Bearer " + tk },
-        muteHttpExceptions: true,
-      });
-      if (br.getResponseCode() === 200) {
-        var bp = JSON.parse(br.getContentText());
-        var bm = Array.isArray(bp[0]) ? bp[0] : bp;
-        Logger.log(label + " breakdown → " + br.getResponseCode() + " members=" + (Array.isArray(bm) ? bm.length : "?") + " first=" + (bm[0] && bm[0].name));
-      } else {
-        Logger.log(label + " breakdown → " + br.getResponseCode() + ": " + br.getContentText().slice(0,100));
-      }
-      return tk;
-    }
-
-    // Base auth (no extras) — confirm current state
-    tryAuth("base auth", { email: email, password: password });
-    // Auth with 69R member ID
-    if (memberId69R) tryAuth("memberId=69R(" + memberId69R.slice(0,8) + "...)", { email: email, password: password, memberId: memberId69R });
-    // Auth with 69S member ID
-    if (memberId69S) tryAuth("memberId=69S(" + memberId69S.slice(0,8) + "...)", { email: email, password: password, memberId: memberId69S });
-
-  } catch(err) {
-    Logger.log("debugCtResponse ERROR: " + err.message);
-  }
-}
-
-// Run this ONCE from the Apps Script editor to register the hourly trigger.
-// If you need to change the frequency, run it again — it deletes the old trigger first.
-// To use every 30 minutes instead, change everyHours(1) to everyMinutes(30).
 function setupEpicChestsTrigger() {
-  // Remove any existing epic chest triggers
   ScriptApp.getProjectTriggers().forEach(function(t) {
-    if (t.getHandlerFunction() === "syncEpicChests") {
-      ScriptApp.deleteTrigger(t);
-    }
+    if (t.getHandlerFunction() === "syncEpicChests") ScriptApp.deleteTrigger(t);
   });
-
-  // Create hourly trigger
-  ScriptApp.newTrigger("syncEpicChests")
-    .timeBased()
-    .everyHours(1)
-    .create();
-
+  ScriptApp.newTrigger("syncEpicChests").timeBased().everyHours(1).create();
   Logger.log("Epic Chests trigger set: every hour.");
 }

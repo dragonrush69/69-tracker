@@ -319,6 +319,8 @@ async function saveToSheets(data) {
       body: JSON.stringify(data),
     });
     if (!res.ok) throw new Error("HTTP " + res.status);
+    const result = await res.json().catch(() => ({}));
+    if (result.error) throw new Error(result.error);
     showSaveToast(true);
   } catch (err) {
     console.warn("Sheets save failed:", err);
