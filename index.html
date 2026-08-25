@@ -2406,19 +2406,20 @@ const ClanHealthDrillDown = ({ clan, eventId, onBack }) => {
 // ─── TIER DRILLDOWN SHEET ─────────────────────────────────────────────────────
 // Bottom sheet shown when an admin taps a tier badge in the Guard Mix.
 // Lets them update guard levels, mark inactive, or rotate clan — all atomic saves.
-const TierDrilldownSheet = ({ tier, clan, isAdmin, onClose, forceUpdate }) => {
+const TierDrilldownSheet = ({ tier, clan, isAdmin, onClose }) => {
   const [confirmInactive, setConfirmInactive] = React.useState(null);
   const [confirmRotate,   setConfirmRotate]   = React.useState(null);
+  const [, refresh] = React.useReducer(n => n + 1, 0); // local re-render after level saves
 
   const allPlayers = storage.getPlayers();
   const players = allPlayers.filter(p => p.clan === clan && p.active && getPlayerTier(p) === tier);
 
   const saveLevel = (playerId, type, val) => {
-    window._appData.players = allPlayers.map(p =>
+    window._appData.players = storage.getPlayers().map(p =>
       p.id === playerId ? { ...p, levels: { ...p.levels, [type]: val || null } } : p
     );
     saveToSheets(window._appData);
-    forceUpdate();
+    refresh(); // re-render the sheet so dropdowns reflect new values
   };
 
   const doMarkInactive = (player) => {
@@ -2427,8 +2428,7 @@ const TierDrilldownSheet = ({ tier, clan, isAdmin, onClose, forceUpdate }) => {
     );
     saveToSheets(window._appData);
     setConfirmInactive(null);
-    onClose();
-    forceUpdate();
+    onClose(); // closing triggers parent re-render — guard mix tiles update
   };
 
   const doRotate = (player, toClan) => {
@@ -2437,8 +2437,7 @@ const TierDrilldownSheet = ({ tier, clan, isAdmin, onClose, forceUpdate }) => {
     window._appData.rotationLog = [logEntry, ...(window._appData.rotationLog || [])];
     saveToSheets(window._appData);
     setConfirmRotate(null);
-    onClose();
-    forceUpdate();
+    onClose(); // closing triggers parent re-render — guard mix tiles update
   };
 
   const tierColor = tier.startsWith("T") ? "#7c3aed" : "#475569";
@@ -2720,7 +2719,6 @@ const TrendsScreen = () => {
           clan={tierDrilldown.clan}
           isAdmin={isAdmin}
           onClose={() => setTierDrilldown(null)}
-          forceUpdate={forceUpdate}
         />
       )}
 
