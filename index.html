@@ -1090,8 +1090,8 @@ const Btn = ({ children, onClick, variant="secondary", size="md", fullWidth=fals
   );
 };
 
-const Modal = ({ title, message, confirmLabel, confirmVariant="primary", onConfirm, onCancel }) => (
-  <div style={{ position:"fixed", inset:0, backgroundColor:"rgba(0,0,0,0.45)", zIndex:200, display:"flex", alignItems:"flex-end", justifyContent:"center" }}>
+const Modal = ({ title, message, confirmLabel, confirmVariant="primary", onConfirm, onCancel, zIndex=200 }) => (
+  <div style={{ position:"fixed", inset:0, backgroundColor:"rgba(0,0,0,0.45)", zIndex, display:"flex", alignItems:"flex-end", justifyContent:"center" }}>
     <div style={{ backgroundColor:"#fff", borderRadius:"20px 20px 0 0", padding:"24px 20px 40px", width:"100%", maxWidth:430 }}>
       <h3 style={{ fontSize:18, fontWeight:800, color:"#1e293b", margin:"0 0 8px" }}>{title}</h3>
       <p style={{ fontSize:14, color:"#64748b", margin:"0 0 20px", lineHeight:1.5 }}>{message}</p>
@@ -2510,7 +2510,7 @@ const TierDrilldownSheet = ({ tier, clan, isAdmin, onClose }) => {
         </div>
       </div>
 
-      {/* Confirm: mark inactive */}
+      {/* Confirm: mark inactive — zIndex 300 so it renders above the sheet (201) */}
       {confirmInactive && (
         <Modal
           title={`Deactivate ${confirmInactive.name}?`}
@@ -2519,10 +2519,11 @@ const TierDrilldownSheet = ({ tier, clan, isAdmin, onClose }) => {
           confirmVariant="danger"
           onConfirm={() => doMarkInactive(confirmInactive)}
           onCancel={() => setConfirmInactive(null)}
+          zIndex={300}
         />
       )}
 
-      {/* Confirm: rotate clan */}
+      {/* Confirm: rotate clan — zIndex 300 so it renders above the sheet (201) */}
       {confirmRotate && (
         <Modal
           title={`Move ${confirmRotate.player.name} to ${confirmRotate.toClan}?`}
@@ -2531,6 +2532,7 @@ const TierDrilldownSheet = ({ tier, clan, isAdmin, onClose }) => {
           confirmVariant="primary"
           onConfirm={() => doRotate(confirmRotate.player, confirmRotate.toClan)}
           onCancel={() => setConfirmRotate(null)}
+          zIndex={300}
         />
       )}
     </>
