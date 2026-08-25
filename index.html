@@ -424,7 +424,7 @@ const storage = {
 
   savePlayers: v => {
     _ensure(); window._appData.players = v;
-    saveToSheets(window._appData);
+    saveToSheets({ players: v });
   },
   saveScores: v => {
     _ensure(); window._appData.scores = v;
@@ -2415,27 +2415,33 @@ const TierDrilldownSheet = ({ tier, clan, isAdmin, onClose }) => {
   const players = allPlayers.filter(p => p.clan === clan && p.active && getPlayerTier(p) === tier);
 
   const saveLevel = (playerId, type, val) => {
-    window._appData.players = storage.getPlayers().map(p =>
+    const updated = storage.getPlayers().map(p =>
       p.id === playerId ? { ...p, levels: { ...p.levels, [type]: val || null } } : p
     );
-    saveToSheets(window._appData);
+    window._appData.players = updated;
+    // Send only players — avoids rewriting all score tabs on every level change
+    saveToSheets({ players: updated });
     refresh(); // re-render the sheet so dropdowns reflect new values
   };
 
   const doMarkInactive = (player) => {
-    window._appData.players = storage.getPlayers().map(p =>
+    const updated = storage.getPlayers().map(p =>
       p.id === player.id ? { ...p, active: false } : p
     );
-    saveToSheets(window._appData);
+    window._appData.players = updated;
+    saveToSheets({ players: updated });
     setConfirmInactive(null);
     onClose(); // closing triggers parent re-render — guard mix tiles update
   };
 
   const doRotate = (player, toClan) => {
     const logEntry = { id: uid(), playerId: player.id, playerName: player.name, fromClan: player.clan, toClan, date: today() };
-    window._appData.players    = storage.getPlayers().map(p => p.id === player.id ? { ...p, clan: toClan } : p);
-    window._appData.rotationLog = [logEntry, ...(window._appData.rotationLog || [])];
-    saveToSheets(window._appData);
+    const updatedPlayers = storage.getPlayers().map(p => p.id === player.id ? { ...p, clan: toClan } : p);
+    const updatedLog     = [logEntry, ...(window._appData.rotationLog || [])];
+    window._appData.players    = updatedPlayers;
+    window._appData.rotationLog = updatedLog;
+    // Send only the fields that changed
+    saveToSheets({ players: updatedPlayers, rotationLog: updatedLog });
     setConfirmRotate(null);
     onClose(); // closing triggers parent re-render — guard mix tiles update
   };

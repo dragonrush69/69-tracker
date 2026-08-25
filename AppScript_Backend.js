@@ -586,11 +586,13 @@ function writeData(ss, data) {
   if (data.lastBackup  !== undefined) writeConfigKey(ss, "lastBackup", data.lastBackup);
   if (data.norms       !== undefined) writeConfigKey(ss, "norms",      data.norms);
 
-  // CT metadata — read existing first so we don't wipe keys not in this payload
-  var existingCfg = readConfig(ss);
-  writeConfigKey(ss, "ctSync",    data.ctSync    !== undefined ? data.ctSync    : (existingCfg.ctSync    || {}));
-  writeConfigKey(ss, "ctAliases", data.ctAliases !== undefined ? data.ctAliases : (existingCfg.ctAliases || {}));
-  writeConfigKey(ss, "ctIgnored", data.ctIgnored !== undefined ? data.ctIgnored : (existingCfg.ctIgnored || {}));
+  // CT metadata — only update when CT-related keys are present in the payload
+  if (data.ctSync !== undefined || data.ctAliases !== undefined || data.ctIgnored !== undefined) {
+    var existingCfg = readConfig(ss);
+    writeConfigKey(ss, "ctSync",    data.ctSync    !== undefined ? data.ctSync    : (existingCfg.ctSync    || {}));
+    writeConfigKey(ss, "ctAliases", data.ctAliases !== undefined ? data.ctAliases : (existingCfg.ctAliases || {}));
+    writeConfigKey(ss, "ctIgnored", data.ctIgnored !== undefined ? data.ctIgnored : (existingCfg.ctIgnored || {}));
+  }
 
   // Scores — write each event's tab from the incoming scores object
   if (data.scores !== undefined) {
