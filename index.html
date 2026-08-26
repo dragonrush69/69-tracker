@@ -342,6 +342,9 @@ async function syncFromCT() {
   if (!res.ok) throw new Error("HTTP " + res.status);
   const result = await res.json();
   if (result.success) {
+    // Brief pause — Apps Script needs a moment after the sync POST before it
+    // will serve a fresh GET without returning 404
+    await new Promise(r => setTimeout(r, 1500));
     // Reload fresh data so ctSync/scores update in-memory
     const fresh = await loadFromSheets();
     if (fresh && !fresh.error) {

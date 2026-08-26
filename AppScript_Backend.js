@@ -72,6 +72,15 @@ var EMPTY_DATA = {
 };
 
 // ── Utility ───────────────────────────────────────────────────────────────────
+
+// Google Sheets returns date cells as Date objects, not strings.
+// This helper normalises any weekStart/date cell to "YYYY-MM-DD" regardless.
+function normaliseDateStr(val) {
+  if (!val) return "";
+  if (val instanceof Date) return Utilities.formatDate(val, "UTC", "yyyy-MM-dd");
+  return String(val).slice(0, 10);
+}
+
 function safeParse(raw, fallback) {
   if (raw === null || raw === undefined || raw === "") return (fallback !== undefined ? fallback : null);
   if (typeof raw !== "string") return raw; // already parsed
@@ -337,9 +346,9 @@ function readScoreTab(ss, eventId) {
   // Group rows by weekStart+clan into entries
   var entryMap = {}; // key: clan+"||"+weekStart → { date, weekStart, syncedAt, clan, scores:{} }
   rows.forEach(function(r) {
-    var weekStart = r[0] ? String(r[0]).slice(0,10) : "";
-    var entryDate = r[1] ? String(r[1]) : "";
-    var syncedAt  = r[2] ? String(r[2]) : "";
+    var weekStart = normaliseDateStr(r[0]);
+    var entryDate = r[1] instanceof Date ? r[1].toISOString() : (r[1] ? String(r[1]) : "");
+    var syncedAt  = r[2] instanceof Date ? r[2].toISOString() : (r[2] ? String(r[2]) : "");
     var clan      = r[3] ? String(r[3]) : "";
     var playerId  = r[4] ? String(r[4]) : "";
     if (!weekStart || !clan || !playerId) return;
