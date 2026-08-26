@@ -344,7 +344,11 @@ async function syncFromCT() {
   if (result.success) {
     // Reload fresh data so ctSync/scores update in-memory
     const fresh = await loadFromSheets();
-    if (fresh && !fresh.error) window._appData = fresh;
+    if (fresh && !fresh.error) {
+      window._appData = fresh;
+      // Trigger a full-tree re-render so every component picks up the new scores
+      if (typeof window._refreshApp === "function") window._refreshApp();
+    }
   }
   return result;
 }
@@ -426,25 +430,27 @@ const storage = {
     _ensure(); window._appData.players = v;
     saveToSheets({ players: v });
   },
-  saveScores: v => {
+  saveScores: (v, changedKey) => {
     _ensure(); window._appData.scores = v;
-    saveToSheets(window._appData);
+    // changedKey e.g. "69R_olympus" — send only that event's data so the backend
+    // rewrites just one score tab instead of all 6.
+    saveToSheets({ scores: changedKey ? { [changedKey]: v[changedKey] } : v });
   },
   saveLevelRequests: v => {
     _ensure(); window._appData.levelRequests = v;
-    saveToSheets(window._appData);
+    saveToSheets({ levelRequests: v });
   },
   saveRotationLog: v => {
     _ensure(); window._appData.rotationLog = v;
-    saveToSheets(window._appData);
+    saveToSheets({ rotationLog: v });
   },
   saveFragmentDistributions: v => {
     _ensure(); window._appData.fragmentDistributions = v;
-    saveToSheets(window._appData);
+    saveToSheets({ fragmentDistributions: v });
   },
   saveLastBackup: v => {
     _ensure(); window._appData.lastBackup = v;
-    saveToSheets(window._appData);
+    saveToSheets({ lastBackup: v });
   },
   getNorms: () => window._appData?.norms || {},
 };
@@ -1202,7 +1208,7 @@ const PlayerDetail = ({ player, onBack }) => {
         ? { ...e, scores: { ...e.scores, [player.id]: editValues } }
         : e
     );
-    storage.saveScores({ ...allScores, [key]: updated });
+    storage.saveScores({ ...allScores, [key]: updated }, key);
     setEditingEntry(null);
     setEditValues({});
     forceUpdate();
@@ -1217,7 +1223,7 @@ const PlayerDetail = ({ player, onBack }) => {
       delete s[player.id];
       return { ...e, scores: s };
     });
-    storage.saveScores({ ...allScores, [key]: updated });
+    storage.saveScores({ ...allScores, [key]: updated }, key);
     setDeleteConfirm(null);
     forceUpdate();
   };
@@ -1596,7 +1602,10 @@ const BulkPaste = ({ clan, event, onBack }) => {
       if (all[key].length > 3) all[key] = all[key].slice(0, 3);
     }
     window._appData.scores = all;
-    saveToSheets(window._appData); // single atomic save
+    // Atomic save: only send what changed — new players (if any) + the one synced score event
+    saveToSheets(newPlayers.length
+      ? { players: window._appData.players, scores: { [key]: all[key] } }
+      : { scores: { [key]: all[key] } });
 
     setSaved(true);
     scrollToTop();
@@ -2106,7 +2115,7 @@ const ScoreForm = ({ clan, event, onBack }) => {
       all[key].unshift({ date: new Date().toISOString(), scores });
       if (all[key].length > 3) all[key] = all[key].slice(0, 3);
     }
-    storage.saveScores(all);
+    storage.saveScores(all, key);
     setSaved(true);
     scrollToTop();
     setTimeout(() => { setSaved(false); onBack(); scrollToTop(); }, 1200);
@@ -3153,14 +3162,14 @@ const LevelRequestsView = ({ onBack }) => {
     // Apply both changes to appData and do ONE atomic save
     window._appData.players       = updatedPlayers;
     window._appData.levelRequests = updatedReqs;
-    saveToSheets(window._appData);
+    saveToSheets({ players: updatedPlayers, levelRequests: updatedReqs });
     forceUpdate();
   };
 
   const reject = (id) => {
     const updatedReqs = storage.getLevelRequests().map(r => r.id === id ? { ...r, status:"rejected", resolvedDate:today() } : r);
     window._appData.levelRequests = updatedReqs;
-    saveToSheets(window._appData);
+    saveToSheets({ levelRequests: updatedReqs });
     forceUpdate();
   };
 
@@ -3513,7 +3522,7 @@ const BulkPlayerUpdate = ({ onBack }) => {
       }
     });
     window._appData.players = players;
-    saveToSheets(window._appData);
+    saveToSheets({ players });
     setSaved(true);
     setTimeout(() => { setSaved(false); onBack(); }, 1400);
   };
@@ -3756,7 +3765,7 @@ const MergePlayersView = ({ onBack }) => {
     }
     // Delete the source record by its original index, not by id
     window._appData.players = all.filter((p, i) => i !== sourceIdx);
-    saveToSheets(window._appData);
+    saveToSheets({ players: window._appData.players, scores: window._appData.scores });
     onBack();
   };
 
@@ -3944,7 +3953,7 @@ const DeletePlayerView = ({ onBack }) => {
       });
     });
     window._appData.scores = newScores;
-    saveToSheets(window._appData);
+    saveToSheets({ players: window._appData.players, scores: newScores });
     setDeleting(null);
     forceUpdate();
   };
@@ -5433,6 +5442,8 @@ function App() {
   const [preloading,   setPreloading]   = useState(false);
   const [preloadError, setPreloadError] = useState(false);
   const forceUpdate = useForceUpdate();
+  // Expose globally so syncFromCT can trigger a full-tree re-render after updating window._appData
+  window._refreshApp = forceUpdate;
 
   // Pre-load Sheets data before showing the login screen so PINs are always fresh.
   // Retries up to 3 times (handles Apps Script cold starts). If all attempts fail,

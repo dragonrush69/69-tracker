@@ -925,6 +925,9 @@ function syncEpicChests() {
       if (!appData.scores[key]) appData.scores[key] = [];
       var entries = appData.scores[key];
       if (entries.length > 0 && entries[0].weekStart === weekStart) {
+        // Merge: keep existing scores for players not returned by CT this sync
+        // (avoids wiping unmatched players who had a score from a previous run)
+        entry.scores = Object.assign({}, entries[0].scores, entry.scores);
         entries[0] = entry;
       } else {
         entries.unshift(entry);
@@ -949,6 +952,56 @@ function syncEpicChests() {
     Logger.log("syncEpicChests ERROR: " + err.message);
     return { success: false, error: err.message };
   }
+}
+
+// Run this from the Apps Script editor to see exactly what ChestTracker returns.
+// Look for "dman" (or any name) in the log to see their raw API values.
+function debugCtRawData() {
+  var ss  = SpreadsheetApp.getActiveSpreadsheet();
+  var now = new Date();
+
+  var dayOfWeek   = now.getUTCDay();
+  var daysBack    = dayOfWeek === 0 && now.getUTCHours() < 18 ? 7 : dayOfWeek;
+  var startOfWeek = new Date(now);
+  startOfWeek.setUTCDate(now.getUTCDate() - daysBack);
+  startOfWeek.setUTCHours(18, 0, 0, 0);
+
+  var timeParams = "?levels=1"
+                 + "&start=" + encodeURIComponent(startOfWeek.toISOString())
+                 + "&end="   + encodeURIComponent(now.toISOString());
+
+  Logger.log("Week window: " + startOfWeek.toISOString() + " → " + now.toISOString());
+
+  var baseToken   = getCTToken();
+  var baseHeaders = { "Authorization": "Bearer " + baseToken };
+
+  var clansRaw    = JSON.parse(UrlFetchApp.fetch(CT_API_BASE + "/clans",   { headers: baseHeaders, muteHttpExceptions: true }).getContentText());
+  var clansList   = Array.isArray(clansRaw[0])  ? clansRaw[0]  : clansRaw;
+  var membersRaw  = JSON.parse(UrlFetchApp.fetch(CT_API_BASE + "/members", { headers: baseHeaders, muteHttpExceptions: true }).getContentText());
+  var acctMembers = Array.isArray(membersRaw[0]) ? membersRaw[0] : membersRaw;
+
+  var tagToClanId = {};
+  clansList.forEach(function(c) { if (c.tag && c.id) tagToClanId[c.tag] = c.id; });
+  var clanIdToMemberId = {};
+  acctMembers.forEach(function(m) { if (m.clanId && m.id) clanIdToMemberId[m.clanId] = m.id; });
+
+  ["69R", "69S"].forEach(function(clan) {
+    var clanId   = tagToClanId[clan];
+    var memberId = clanId && clanIdToMemberId[clanId];
+    if (!memberId) { Logger.log(clan + ": no member ID"); return; }
+
+    var clanToken = getCTToken(memberId);
+    var resp = UrlFetchApp.fetch(CT_API_BASE + "/chests/breakdown" + timeParams,
+                                 { headers: { "Authorization": "Bearer " + clanToken }, muteHttpExceptions: true });
+    var members = JSON.parse(resp.getContentText());
+    if (Array.isArray(members[0])) members = members[0];
+
+    Logger.log("=== " + clan + " (" + members.length + " members) ===");
+    members.forEach(function(m) {
+      var epicSquad = m["epic squad"] || {};
+      Logger.log(m.name + " | epic squad chests: " + epicSquad.chests + " | raw epic squad: " + JSON.stringify(epicSquad));
+    });
+  });
 }
 
 function setupEpicChestsTrigger() {
