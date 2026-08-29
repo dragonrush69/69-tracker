@@ -605,7 +605,7 @@ function ragStatus(pct) {
 
 // ─── GUARD TIER + TREND HELPERS ──────────────────────────────────────────────
 // T{n} = all four guards (G, M, S, E) equal at level n
-// G{n} = highest guard is n but at least one guard is lower
+// G{n} = guards are not all equal; n is the player's G-type level specifically
 function getPlayerTier(player) {
   const lvls = player?.levels;
   if (!lvls) return null;
@@ -615,7 +615,8 @@ function getPlayerTier(player) {
   });
   if (nums.some(n => n === null || isNaN(n))) return null;
   const max = Math.max(...nums);
-  return nums.every(n => n === max) ? `T${max}` : `G${max}`;
+  const gLevel = nums[0]; // G-type is first in the array
+  return nums.every(n => n === max) ? `T${max}` : `G${gLevel}`;
 }
 
 function getClanTierBreakdown(clan) {
