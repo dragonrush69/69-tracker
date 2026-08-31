@@ -151,10 +151,12 @@ function resolvePin(pin) {
   if (!pin) return null;
   const p = getActivePins();
   if (!p) return null; // Sheets not yet loaded — block login
-  if (pin === p.super)  return { role:"super",   clan:null  };
-  if (pin === p["69R"]) return { role:"clan",    clan:"69R" };
-  if (pin === p["69S"]) return { role:"clan",    clan:"69S" };
-  if (pin === p["69D"]) return { role:"clan",    clan:"69D" };
+  // Log the loaded pins structure (first char only for security) to help diagnose PIN issues
+  console.log("[PIN DEBUG] Loaded pins keys/lengths:", Object.fromEntries(Object.entries(p).map(([k,v])=>[k, v ? `${v.length} chars, starts: ${v[0]}` : "(empty)"])));
+  if (pin === p.super)  { console.log("[PIN DEBUG] Matched: super"); return { role:"super",   clan:null  }; }
+  if (pin === p["69R"]) { console.log("[PIN DEBUG] Matched: 69R");   return { role:"clan",    clan:"69R" }; }
+  if (pin === p["69S"]) { console.log("[PIN DEBUG] Matched: 69S");   return { role:"clan",    clan:"69S" }; }
+  if (pin === p["69D"]) { console.log("[PIN DEBUG] Matched: 69D");   return { role:"clan",    clan:"69D" }; }
   if (pin === p.user)   return { role:"user",    clan:null  };
   return null;
 }
@@ -202,12 +204,13 @@ const SessionCtx = createContext(null);
 const useSession = () => useContext(SessionCtx);
 
 // ─── LOGIN SCREEN ─────────────────────────────────────────────────────────────
-const LoginScreen = ({ onLogin }) => {
+const LoginScreen = ({ onLogin, isLoading = false }) => {
   const [pin,   setPin]   = useState("");
   const [error, setError] = useState(false);
   const [shake, setShake] = useState(false);
 
   const submit = (finalPin) => {
+    if (isLoading) return; // Block submission while PINs haven't loaded yet
     const session = resolvePin(finalPin);
     if (session) {
       const sessionWithTime = { ...session, loginAt: Date.now(), pinHash: btoa(finalPin) };
@@ -222,18 +225,19 @@ const LoginScreen = ({ onLogin }) => {
   };
 
   const tap = (val) => {
+    if (isLoading) return;
     setError(false);
     const next = pin + val;
     setPin(next);
     if (next.length === 4) submit(next);
   };
 
-  const del = () => { setError(false); setPin(p => p.slice(0, -1)); };
+  const del = () => { if (isLoading) return; setError(false); setPin(p => p.slice(0, -1)); };
 
   const dots = Array.from({ length: 4 }, (_, i) => (
     <div key={i} style={{
       width:14, height:14, borderRadius:7,
-      backgroundColor: i < pin.length ? (error ? "#dc2626" : "#1e293b") : "#e2e8f0",
+      backgroundColor: isLoading ? "#e2e8f0" : (i < pin.length ? (error ? "#dc2626" : "#1e293b") : "#e2e8f0"),
       transition:"background-color 0.15s",
     }}/>
   ));
@@ -251,23 +255,30 @@ const LoginScreen = ({ onLogin }) => {
       <div style={{ display:"flex", gap:14, marginBottom:8, transform: shake ? "translateX(0)" : undefined, animation: shake ? "shake 0.4s ease" : undefined }}>
         {dots}
       </div>
-      {error && <div style={{ fontSize:12, color:"#dc2626", fontWeight:600, marginBottom:12 }}>Incorrect PIN — try again</div>}
-      {!error && <div style={{ height:28 }}/>}
+      {isLoading
+        ? <div style={{ fontSize:12, color:"#94a3b8", fontWeight:600, marginBottom:12, display:"flex", alignItems:"center", gap:6 }}>
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" style={{ animation:"spin 1s linear infinite" }}><circle cx="12" cy="12" r="10" stroke="#e2e8f0" strokeWidth="3"/><path d="M12 2a10 10 0 0 1 10 10" stroke="#94a3b8" strokeWidth="3" strokeLinecap="round"/></svg>
+            Connecting…
+          </div>
+        : error
+          ? <div style={{ fontSize:12, color:"#dc2626", fontWeight:600, marginBottom:12 }}>Incorrect PIN — try again</div>
+          : <div style={{ height:28 }}/>
+      }
 
-      <div style={{ display:"flex", flexDirection:"column", gap:10, width:"100%", maxWidth:240 }}>
+      <div style={{ display:"flex", flexDirection:"column", gap:10, width:"100%", maxWidth:240, opacity: isLoading ? 0.4 : 1, pointerEvents: isLoading ? "none" : "auto", transition:"opacity 0.3s" }}>
         {keys.map((row, ri) => (
           <div key={ri} style={{ display:"flex", gap:10 }}>
             {row.map((k, ki) => (
               <button key={ki} onClick={() => k === "⌫" ? del() : k !== null ? tap(String(k)) : null}
-                disabled={k === null}
-                style={{ flex:1, height:64, borderRadius:16, border:"none", fontSize: k === "⌫" ? 20 : 22, fontWeight:700, cursor: k === null ? "default" : "pointer", backgroundColor: k === null ? "transparent" : "#fff", color:"#1e293b", boxShadow: k === null ? "none" : "0 1px 4px rgba(0,0,0,0.08),0 0 0 1px rgba(0,0,0,0.05)", fontFamily:"'DM Mono',monospace" }}>
+                disabled={k === null || isLoading}
+                style={{ flex:1, height:64, borderRadius:16, border:"none", fontSize: k === "⌫" ? 20 : 22, fontWeight:700, cursor: (k === null || isLoading) ? "default" : "pointer", backgroundColor: k === null ? "transparent" : "#fff", color:"#1e293b", boxShadow: k === null ? "none" : "0 1px 4px rgba(0,0,0,0.08),0 0 0 1px rgba(0,0,0,0.05)", fontFamily:"'DM Mono',monospace" }}>
                 {k === null ? "" : k}
               </button>
             ))}
           </div>
         ))}
       </div>
-      <style>{`@keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-8px)}40%{transform:translateX(8px)}60%{transform:translateX(-6px)}80%{transform:translateX(6px)}}`}</style>
+      <style>{`@keyframes shake{0%,100%{transform:translateX(0)}20%{transform:translateX(-8px)}40%{transform:translateX(8px)}60%{transform:translateX(-6px)}80%{transform:translateX(6px)}} @keyframes spin{to{transform:rotate(360deg)}}`}</style>
     </div>
   );
 };
@@ -5622,16 +5633,11 @@ function App() {
     </div>
   );
 
-  // Not logged in — fetch latest Sheets data first (so PINs are always fresh)
+  // Not logged in — show login screen immediately; PIN pad unlocks once Sheets data arrives
   if (!session) {
     if (preloading) return shell(
       <SessionCtx.Provider value={{ role:"none", clan:null }}>
-        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", minHeight:"100vh", gap:12 }}>
-          <div style={{ width:52, height:52, borderRadius:14, backgroundColor:"#1e293b", display:"flex", alignItems:"center", justifyContent:"center" }}>
-            <Icon name="trophy" size={24} color="#f59e0b"/>
-          </div>
-          <div style={{ fontSize:13, fontWeight:600, color:"#94a3b8", letterSpacing:"0.05em" }}>Connecting…</div>
-        </div>
+        <LoginScreen onLogin={handleLogin} isLoading={true}/>
       </SessionCtx.Provider>
     );
     if (preloadError) return shell(
