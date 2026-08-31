@@ -1899,6 +1899,29 @@ const EpicChestsView = ({ clan, event, onBack }) => {
         {syncMsg && <div style={{ fontSize:12, color:"#475569", marginTop:8, padding:"7px 10px", backgroundColor:"#f8fafc", borderRadius:7, border:"1px solid #e2e8f0" }}>{syncMsg}</div>}
       </Card>
 
+      {/* Debug panel — super users only */}
+      {isSuper && (() => {
+        const scoreKeys = latest ? Object.keys(latest.scores || {}) : [];
+        const playerIds = players.map(p => p.id);
+        const matched   = scoreKeys.filter(k => playerIds.includes(k));
+        return (
+          <details style={{ marginBottom:12, fontSize:11, color:"#64748b", background:"#f8fafc", borderRadius:8, padding:"8px 12px", border:"1px solid #e2e8f0" }}>
+            <summary style={{ cursor:"pointer", fontWeight:700, color:"#475569" }}>
+              Debug — entries:{entries.length} · scoreKeys:{scoreKeys.length} · players:{playerIds.length} · matched:{matched.length}
+            </summary>
+            <div style={{ marginTop:6, fontFamily:"monospace", fontSize:10, whiteSpace:"pre-wrap", wordBreak:"break-all" }}>
+              <div><b>weekStart:</b> {latest?.weekStart || "—"}</div>
+              <div><b>First 3 scoreKeys:</b> {scoreKeys.slice(0,3).join(", ") || "(none)"}</div>
+              <div><b>First 3 playerIds:</b> {playerIds.slice(0,3).join(", ") || "(none)"}</div>
+              <div><b>latest.scores type:</b> {latest ? typeof latest.scores : "no latest"}</div>
+              <div><b>raw scores key exists:</b> {String(!!(window._appData?.scores?.[scoreKey]))}</div>
+              <div><b>raw scores type:</b> {Array.isArray(window._appData?.scores?.[scoreKey]) ? "array[" + (window._appData.scores[scoreKey].length) + "]" : typeof window._appData?.scores?.[scoreKey]}</div>
+              <div><b>first entry scores (truncated):</b> {JSON.stringify(window._appData?.scores?.[scoreKey]?.[0]?.scores ?? window._appData?.scores?.[scoreKey] ?? "missing").slice(0,200)}</div>
+            </div>
+          </details>
+        );
+      })()}
+
       {/* Player list */}
       {!latest ? (
         <div style={{ textAlign:"center", padding:"36px 0", color:"#94a3b8", fontSize:14 }}>
