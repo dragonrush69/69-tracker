@@ -565,16 +565,48 @@ const Sparkline = ({ data, color="#3b82f6", height=50 }) => {
   const max  = Math.max(...vals);
   const range = max - min || 1;
   const W = 200, H = height;
+  const n = vals.length;
   const ptArr = vals.map((v, i) => [
-    (i / (vals.length - 1)) * W,
+    (i / (n - 1)) * W,
     H - ((v - min) / range) * (H - 10) - 5
   ]);
   const pts = ptArr.map(([x, y]) => `${x},${y}`).join(" ");
+
+  // Position helpers — pin first label left, last label right, others centred
+  const xPct      = i => i === 0 ? 0 : i === n - 1 ? 100 : (i / (n - 1)) * 100;
+  const labelXfrm = i => i === 0 ? "translateX(0)" : i === n - 1 ? "translateX(-100%)" : "translateX(-50%)";
+
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width:"100%", height, display:"block" }} preserveAspectRatio="none">
-      <polyline points={pts} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
-      {ptArr.map(([x, y], i) => <circle key={i} cx={x} cy={y} r="3.5" fill={color}/>)}
-    </svg>
+    <div>
+      {/* Value labels above each data point */}
+      <div style={{ position:"relative", height:16, marginBottom:3 }}>
+        {vals.map((v, i) => (
+          <span key={i} style={{
+            position:"absolute", left:`${xPct(i)}%`, transform:labelXfrm(i),
+            fontSize:9, fontWeight:800, color, fontFamily:"'DM Mono',monospace",
+            whiteSpace:"nowrap", lineHeight:1,
+          }}>
+            {formatScore(v)}
+          </span>
+        ))}
+      </div>
+      {/* Sparkline */}
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width:"100%", height, display:"block" }} preserveAspectRatio="none">
+        <polyline points={pts} fill="none" stroke={color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>
+        {ptArr.map(([x, y], i) => <circle key={i} cx={x} cy={y} r="3.5" fill={color}/>)}
+      </svg>
+      {/* Date labels below each data point */}
+      <div style={{ position:"relative", height:13, marginTop:3 }}>
+        {data.map((d, i) => (
+          <span key={i} style={{
+            position:"absolute", left:`${xPct(i)}%`, transform:labelXfrm(i),
+            fontSize:8, color:"#94a3b8", whiteSpace:"nowrap", lineHeight:1,
+          }}>
+            {d.date}
+          </span>
+        ))}
+      </div>
+    </div>
   );
 };
 
@@ -2459,7 +2491,8 @@ const TierDrilldownSheet = ({ tier, clan, isAdmin, onClose }) => {
   const [, refresh] = React.useReducer(n => n + 1, 0); // local re-render after level saves
 
   const allPlayers = storage.getPlayers();
-  const players = allPlayers.filter(p => p.clan === clan && p.active && getPlayerTier(p) === tier);
+  const players = allPlayers.filter(p => p.clan === clan && p.active &&
+    (tier === "?" ? !getPlayerTier(p) : getPlayerTier(p) === tier));
 
   const saveLevel = (playerId, type, val) => {
     const updated = storage.getPlayers().map(p =>
@@ -2746,13 +2779,7 @@ const TrendsScreen = () => {
                         )}
                       </div>
                       {data.length >= 2 ? (
-                        <>
-                          <Sparkline data={data} color={CLAN_COLORS[c]||"#3b82f6"} height={50}/>
-                          <div style={{ display:"flex", justifyContent:"space-between", marginTop:4 }}>
-                            <span style={{ fontSize:9, color:"#94a3b8" }}>{data[0]?.date}</span>
-                            <span style={{ fontSize:9, color:"#94a3b8" }}>{data[data.length-1]?.date}</span>
-                          </div>
-                        </>
+                        <Sparkline data={data} color={CLAN_COLORS[c]||"#3b82f6"} height={50}/>
                       ) : (
                         <div style={{ height:40, backgroundColor:"#f8fafc", borderRadius:6, display:"flex", alignItems:"center", justifyContent:"center" }}>
                           <span style={{ fontSize:11, color:"#94a3b8" }}>{data.length===0?"No data yet":"Need 2+ entries for chart"}</span>
