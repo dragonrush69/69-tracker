@@ -7,7 +7,7 @@
     // On the next pull-to-refresh, browsers navigate to a versioned URL (?dv=X),
     // which is never in cache, so they always fetch the latest HTML.
     (function() {
-      var V = "3";
+      var V = "6";
       var p = new URLSearchParams(location.search);
       if (p.get("dv") !== V) {
         p.set("dv", V);
@@ -43,6 +43,11 @@ const { useState, useRef, useEffect, createContext, useContext } = React;
 // There are NO hardcoded fallback PINs — if Sheets hasn't loaded, login is blocked.
 // The backend (AppScript_Backend.js) stores DEFAULT_PINS in A21 on first run,
 // so Sheets will always return valid PINs once it's reachable.
+
+// ─── PINS-ONLY FETCH ─────────────────────────────────────────────────────────
+// Fetches just the pins from the ?action=getPins endpoint (reads Config tab only).
+// Much faster than a full data load — used pre-login to unlock the PIN pad quickly.
+// Full data loads after login via the existing post-login init() effect.
 
 function getActivePins() {
   // PINs come exclusively from Sheets data already in memory.
@@ -151,12 +156,10 @@ function resolvePin(pin) {
   if (!pin) return null;
   const p = getActivePins();
   if (!p) return null; // Sheets not yet loaded — block login
-  // Log the loaded pins structure (first char only for security) to help diagnose PIN issues
-  console.log("[PIN DEBUG] Loaded pins keys/lengths:", Object.fromEntries(Object.entries(p).map(([k,v])=>[k, v ? `${v.length} chars, starts: ${v[0]}` : "(empty)"])));
-  if (pin === p.super)  { console.log("[PIN DEBUG] Matched: super"); return { role:"super",   clan:null  }; }
-  if (pin === p["69R"]) { console.log("[PIN DEBUG] Matched: 69R");   return { role:"clan",    clan:"69R" }; }
-  if (pin === p["69S"]) { console.log("[PIN DEBUG] Matched: 69S");   return { role:"clan",    clan:"69S" }; }
-  if (pin === p["69D"]) { console.log("[PIN DEBUG] Matched: 69D");   return { role:"clan",    clan:"69D" }; }
+  if (pin === p.super)  return { role:"super",   clan:null  };
+  if (pin === p["69R"]) return { role:"clan",    clan:"69R" };
+  if (pin === p["69S"]) return { role:"clan",    clan:"69S" };
+  if (pin === p["69D"]) return { role:"clan",    clan:"69D" };
   if (pin === p.user)   return { role:"user",    clan:null  };
   return null;
 }
@@ -5498,6 +5501,17 @@ const PageHeader = ({ screen, onLogout }) => {
   );
 };
 
+// ─── DATA LOADING PLACEHOLDER ────────────────────────────────────────────────
+// Shown on tabs that need full Sheets data while it loads in the background.
+const DataLoadingScreen = () => (
+  <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", minHeight:"60vh", gap:12 }}>
+    <div style={{ fontSize:13, fontWeight:600, color:"#94a3b8", letterSpacing:"0.04em" }}>Loading clan data…</div>
+    <div style={{ width:36, height:4, borderRadius:4, backgroundColor:"#e2e8f0", overflow:"hidden" }}>
+      <div style={{ height:"100%", width:"60%", backgroundColor:"#1e293b", borderRadius:4 }}/>
+    </div>
+  </div>
+);
+
 // ─── APP ROOT ─────────────────────────────────────────────────────────────────
 function App() {
   const [session,    setSession]    = useState(null); // session lives in memory only — every page load requires PIN
@@ -5510,39 +5524,43 @@ function App() {
   // Expose globally so syncFromCT can trigger a full-tree re-render after updating window._appData
   window._refreshApp = forceUpdate;
 
-  // Pre-load Sheets data before showing the login screen so PINs are always fresh.
-  // Retries up to 3 times (handles Apps Script cold starts). If all attempts fail,
-  // shows an error screen with a "Try Again" button — login is blocked until Sheets loads.
+  // Pre-load PINs quickly so the PIN pad is ready fast.
+  // Uses ?action=getPins (reads Config B2 only — much faster than a full data load).
+  // Full Sheets data loads in the background after login.
   useEffect(() => {
-    if (session) return;          // Already logged in — main effect handles it
-    if (!sheetsEnabled()) return; // No Sheets configured
+    if (session) return;
+    if (!sheetsEnabled()) return;
     let cancelled = false;
     setPreloading(true);
     setPreloadError(false);
 
-    const tryLoad = async (attempt) => {
+    const loadPins = async (attempt) => {
       if (cancelled) return;
       try {
-        const data = await loadFromSheets();
+        const res = await fetch(SHEETS_URL + "?action=getPins&t=" + Date.now(), { redirect: "follow" });
         if (cancelled) return;
-        if (data && !data.error) {
-          window._appData = data;
-          setPreloading(false);
-          return;
+        if (res.ok) {
+          const data = await res.json();
+          if (cancelled) return;
+          if (data?.pins) {
+            if (!window._appData) window._appData = {};
+            window._appData.pins = data.pins;
+            setPreloading(false);
+            return;
+          }
         }
       } catch (_) {}
       if (cancelled) return;
       if (attempt < 3) {
-        // Retry with backoff: 3s, 6s
-        await new Promise(r => setTimeout(r, attempt * 3000));
-        tryLoad(attempt + 1);
+        await new Promise(r => setTimeout(r, attempt * 2000));
+        loadPins(attempt + 1);
       } else {
         setPreloading(false);
         setPreloadError(true);
       }
     };
 
-    tryLoad(1);
+    loadPins(1);
     return () => { cancelled = true; };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -5591,53 +5609,42 @@ function App() {
     };
   }, [session]);
 
-  // Load data from Sheets once logged in
+  // After login: show Stack Calculator immediately, load full data in the background.
   useEffect(() => {
     if (!session) return;
-    async function init() {
-      if (sheetsEnabled()) {
-        const data = await loadFromSheets();
-        if (data && !data.error) {
-          window._appData = data;
-          // Verify the PIN for this session's role still matches what's in Sheets.
-          // This catches PIN changes on any device — no extra POST needed.
-          // pinHash is set when the user logs in (btoa of their PIN).
-          if (session?.pinHash) {
-            const p = getActivePins(); // now populated from the freshly-loaded Sheets data
-            let currentPin;
-            if (session.role === "super") currentPin = p?.super;
-            else if (session.role === "clan") currentPin = p?.[session.clan];
-            else if (session.role === "user") currentPin = p?.user;
-            if (currentPin && atob(session.pinHash) !== currentPin) {
-              saveSession(null);
-              setSession(null);
-              setAppReady(false);
-              return;
-            }
-          }
-        } else {
-          _ensure();
-          setLoadError(true);
+    if (!sheetsEnabled()) { _ensure(); return; }
+
+    loadFromSheets().then(data => {
+      if (!data || data.error) { _ensure(); setLoadError(true); return; }
+      // Verify PIN still matches Sheets — catches changes made on another device.
+      if (session?.pinHash) {
+        const freshPins = data.pins || {};
+        let currentPin;
+        if (session.role === "super")     currentPin = freshPins.super;
+        else if (session.role === "clan") currentPin = freshPins[session.clan];
+        else if (session.role === "user") currentPin = freshPins.user;
+        if (currentPin && atob(session.pinHash) !== currentPin) {
+          saveSession(null);
+          setSession(null);
+          setAppReady(false);
+          return;
         }
-      } else {
-        _ensure();
       }
-      // All roles land on Stack Calculator by default
-      setAppReady(true);
-    }
-    init();
+      window._appData = data;
+      forceUpdate(); // refresh all components with full player/score data
+    }).catch(() => { _ensure(); setLoadError(true); });
   }, [session]);
 
   const handleLogin = (s) => {
     setSession(s);
-    setAppReady(false);
+    setAppReady(true); // show Stack Calculator immediately; full data loads in background
   };
 
   const handleLogout = () => {
     saveSession(null);
     setSession(null);
     setAppReady(false);
-    setScreen("players");
+    setScreen("stack");
   };
 
   const globalStyles = `
@@ -5701,13 +5708,16 @@ function App() {
   );
 
   const { total } = getActionItems();
+  // dataReady = full Sheets data has arrived (players array exists).
+  // Stack Calculator never needs it. All other tabs wait for it.
+  const dataReady = window._appData?.players !== undefined;
   const screens = {
-    players:     <PlayersScreen/>,
-    scores:      <ScoreEntryScreen/>,
-    trends:      <TrendsScreen/>,
-    updateLevel: <UpdateLevelScreen/>,
+    players:     dataReady ? <PlayersScreen/>     : <DataLoadingScreen/>,
+    scores:      dataReady ? <ScoreEntryScreen/>  : <DataLoadingScreen/>,
+    trends:      dataReady ? <TrendsScreen/>      : <DataLoadingScreen/>,
+    updateLevel: dataReady ? <UpdateLevelScreen/> : <DataLoadingScreen/>,
     stack:       <StackCalcScreen/>,
-    admin:       <AdminScreen/>,
+    admin:       dataReady ? <AdminScreen/>       : <DataLoadingScreen/>,
   };
 
   // Ensure screen is valid for current role
