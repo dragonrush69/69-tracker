@@ -7,7 +7,7 @@
     // On the next pull-to-refresh, browsers navigate to a versioned URL (?dv=X),
     // which is never in cache, so they always fetch the latest HTML.
     (function() {
-      var V = "7";
+      var V = "8";
       var p = new URLSearchParams(location.search);
       if (p.get("dv") !== V) {
         p.set("dv", V);
@@ -300,7 +300,10 @@ const sheetsEnabled = () => SHEETS_URL && !SHEETS_URL.startsWith("YOUR_");
 async function loadFromSheets() {
   if (!sheetsEnabled()) return null;
   try {
-    const res = await fetch(SHEETS_URL + "?t=" + Date.now(), { redirect: "follow" });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000); // 15s timeout — abort if GAS hangs
+    const res = await fetch(SHEETS_URL + "?t=" + Date.now(), { redirect: "follow", signal: controller.signal });
+    clearTimeout(timer);
     if (!res.ok) throw new Error("HTTP " + res.status);
     return await res.json();
   } catch (err) {
@@ -5642,6 +5645,10 @@ function App() {
         }
       }
       window._appData = data;
+      // Debug: log score structure so we can diagnose display issues
+      const scoreKeys = Object.keys(data.scores || {});
+      const firstKey  = scoreKeys[0];
+      console.log("[69Tracker] Scores loaded — keys:", scoreKeys.length, "| first key:", firstKey, "| entries:", firstKey ? (data.scores[firstKey] || []).length : 0, "| sample entry:", firstKey ? JSON.stringify((data.scores[firstKey] || [])[0]).slice(0, 200) : "none");
       setDataVersion(v => v + 1); // guaranteed React state change → re-render with full data
     }).catch(() => {
       window._appData = { players:[], scores:{}, levelRequests:[], rotationLog:[], fragmentDistributions:[], lastBackup:null, pins: window._appData?.pins || {} };
