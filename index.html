@@ -44,6 +44,23 @@ const { useState, useRef, useEffect, createContext, useContext } = React;
 // The backend (AppScript_Backend.js) stores DEFAULT_PINS in A21 on first run,
 // so Sheets will always return valid PINs once it's reachable.
 
+// ─── PINS-ONLY FETCH ─────────────────────────────────────────────────────────
+// Fetches just the pins from the ?action=getPins endpoint (reads Config tab only).
+// Much faster than a full data load — used pre-login to unlock the PIN pad quickly.
+// Full data loads after login via the existing post-login init() effect.
+async function loadPinsFromSheets() {
+  if (!sheetsEnabled()) return null;
+  try {
+    const res = await fetch(SHEETS_URL + "?action=getPins&t=" + Date.now(), { redirect:"follow" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    return data.pins || null;
+  } catch (err) {
+    console.warn("Pins fetch failed:", err);
+    return null;
+  }
+}
+
 function getActivePins() {
   // PINs come exclusively from Sheets data already in memory.
   // Returns null if Sheets hasn't been loaded yet — callers must handle this.
@@ -5510,12 +5527,14 @@ function App() {
   // Expose globally so syncFromCT can trigger a full-tree re-render after updating window._appData
   window._refreshApp = forceUpdate;
 
-  // Pre-load Sheets data before showing the login screen so PINs are always fresh.
-  // Retries up to 3 times (handles Apps Script cold starts). If all attempts fail,
-  // shows an error screen with a "Try Again" button — login is blocked until Sheets loads.
+  // Fetch PINs only before showing the login screen — fast, reads Config tab only.
+  // Full data loads after login via the post-login init() effect.
+  // Retries up to 3 times with backoff to handle Apps Script cold starts.
+  // The keep-warm trigger (runs every 5 min in GAS) keeps the server hot so this
+  // typically returns in 1-2 s rather than 5-8 s on a cold start.
   useEffect(() => {
-    if (session) return;          // Already logged in — main effect handles it
-    if (!sheetsEnabled()) return; // No Sheets configured
+    if (session) return;
+    if (!sheetsEnabled()) return;
     let cancelled = false;
     setPreloading(true);
     setPreloadError(false);
@@ -5523,17 +5542,17 @@ function App() {
     const tryLoad = async (attempt) => {
       if (cancelled) return;
       try {
-        const data = await loadFromSheets();
+        const pins = await loadPinsFromSheets();
         if (cancelled) return;
-        if (data && !data.error) {
-          window._appData = data;
+        if (pins) {
+          if (!window._appData) window._appData = {};
+          window._appData.pins = pins;
           setPreloading(false);
           return;
         }
       } catch (_) {}
       if (cancelled) return;
       if (attempt < 3) {
-        // Retry with backoff: 3s, 6s
         await new Promise(r => setTimeout(r, attempt * 3000));
         tryLoad(attempt + 1);
       } else {
