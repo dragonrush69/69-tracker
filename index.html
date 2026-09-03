@@ -7,7 +7,7 @@
     // On the next pull-to-refresh, browsers navigate to a versioned URL (?dv=X),
     // which is never in cache, so they always fetch the latest HTML.
     (function() {
-      var V = "6";
+      var V = "7";
       var p = new URLSearchParams(location.search);
       if (p.get("dv") !== V) {
         p.set("dv", V);
@@ -5520,6 +5520,7 @@ function App() {
   const [loadError,  setLoadError]  = useState(false);
   const [preloading,   setPreloading]   = useState(false);
   const [preloadError, setPreloadError] = useState(false);
+  const [dataVersion,  setDataVersion]  = useState(0); // incremented when background data loads
   const forceUpdate = useForceUpdate();
   // Expose globally so syncFromCT can trigger a full-tree re-render after updating window._appData
   window._refreshApp = forceUpdate;
@@ -5612,10 +5613,20 @@ function App() {
   // After login: show Stack Calculator immediately, load full data in the background.
   useEffect(() => {
     if (!session) return;
-    if (!sheetsEnabled()) { _ensure(); return; }
+    if (!sheetsEnabled()) {
+      window._appData = { players:[], scores:{}, levelRequests:[], rotationLog:[], fragmentDistributions:[], lastBackup:null, pins: window._appData?.pins || {} };
+      setDataVersion(v => v + 1);
+      return;
+    }
 
     loadFromSheets().then(data => {
-      if (!data || data.error) { _ensure(); setLoadError(true); return; }
+      if (!data || data.error) {
+        // Load failed — still unblock tabs with empty data so DataLoadingScreen clears
+        window._appData = { players:[], scores:{}, levelRequests:[], rotationLog:[], fragmentDistributions:[], lastBackup:null, pins: window._appData?.pins || {} };
+        setLoadError(true);
+        setDataVersion(v => v + 1);
+        return;
+      }
       // Verify PIN still matches Sheets — catches changes made on another device.
       if (session?.pinHash) {
         const freshPins = data.pins || {};
@@ -5631,8 +5642,12 @@ function App() {
         }
       }
       window._appData = data;
-      forceUpdate(); // refresh all components with full player/score data
-    }).catch(() => { _ensure(); setLoadError(true); });
+      setDataVersion(v => v + 1); // guaranteed React state change → re-render with full data
+    }).catch(() => {
+      window._appData = { players:[], scores:{}, levelRequests:[], rotationLog:[], fragmentDistributions:[], lastBackup:null, pins: window._appData?.pins || {} };
+      setLoadError(true);
+      setDataVersion(v => v + 1);
+    });
   }, [session]);
 
   const handleLogin = (s) => {
@@ -5709,8 +5724,9 @@ function App() {
 
   const { total } = getActionItems();
   // dataReady = full Sheets data has arrived (players array exists).
+  // dataVersion state ensures React re-evaluates this when background load completes.
   // Stack Calculator never needs it. All other tabs wait for it.
-  const dataReady = window._appData?.players !== undefined;
+  const dataReady = dataVersion > 0 && window._appData?.players !== undefined;
   const screens = {
     players:     dataReady ? <PlayersScreen/>     : <DataLoadingScreen/>,
     scores:      dataReady ? <ScoreEntryScreen/>  : <DataLoadingScreen/>,
