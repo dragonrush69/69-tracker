@@ -5506,14 +5506,23 @@ const PageHeader = ({ screen, onLogout }) => {
 
 // ─── DATA LOADING PLACEHOLDER ────────────────────────────────────────────────
 // Shown on tabs that need full Sheets data while it loads in the background.
-const DataLoadingScreen = () => (
-  <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", minHeight:"60vh", gap:12 }}>
-    <div style={{ fontSize:13, fontWeight:600, color:"#94a3b8", letterSpacing:"0.04em" }}>Loading clan data…</div>
-    <div style={{ width:36, height:4, borderRadius:4, backgroundColor:"#e2e8f0", overflow:"hidden" }}>
-      <div style={{ height:"100%", width:"60%", backgroundColor:"#1e293b", borderRadius:4 }}/>
+const DataLoadingScreen = () => {
+  const [dots, setDots] = React.useState(".");
+  React.useEffect(() => {
+    const id = setInterval(() => setDots(d => d.length >= 3 ? "." : d + "."), 500);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <div style={{ display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", minHeight:"60vh", gap:16, padding:32, textAlign:"center" }}>
+      <style>{`@keyframes _spin { to { transform:rotate(360deg); } }`}</style>
+      <div style={{ width:36, height:36, border:"3px solid #e2e8f0", borderTopColor:"#1e293b", borderRadius:"50%", animation:"_spin 0.8s linear infinite" }}/>
+      <div style={{ fontSize:14, fontWeight:700, color:"#1e293b" }}>Loading clan data{dots}</div>
+      <div style={{ fontSize:12, color:"#64748b", maxWidth:240, lineHeight:1.6 }}>
+        This takes a moment — the <strong style={{ color:"#1e293b" }}>Stack Calculator</strong> is ready now if you need it.
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 // ─── APP ROOT ─────────────────────────────────────────────────────────────────
 function App() {
